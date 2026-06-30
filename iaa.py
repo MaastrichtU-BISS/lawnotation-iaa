@@ -1,67 +1,53 @@
 """
 Inter-Annotator Agreement for Span Annotations
 ================================================
-Computes per-label Krippendorff's Alpha (all annotators) and Cohen's Kappa
-(each pair).
+Reports TWO complementary views of agreement, computed per label:
 
-Three granularity modes
------------------------
-  char   Each character position is one item. A token gets 1 if any span of
-         the target label covers it, 0 otherwise. Fine-grained; slower on
-         large files. `criterion` has no effect at this level (a character
-         is a point — containment and exactness are identical).
+1. CHANCE-CORRECTED AGREEMENT (Krippendorff's alpha, Cohen's kappa)
+   Measured at char or word granularity. The unit of analysis is a
+   position in the text (a character or a word). This means agreement on
+   one long span contributes many agreeing items, while agreement on
+   several short spans contributes fewer — i.e. it is LENGTH-WEIGHTED.
+   Two annotators agreeing on one big 200-character span counts for more
+   than agreeing on ten separate 5-character spans. This is a deliberate,
+   well-understood property: it reflects how much of the *text* annotators
+   actually agree on, not how many *decisions* they made.
 
-  word   Each whitespace-delimited word is one item. Same 1/0 logic as char
-         but coarser and faster. `criterion` is also inert here in practice
-         because the coverage check (span.start <= tok.start AND
-         span.end >= tok.end) resolves identically for both criteria.
+2. SPAN-MATCHING AGREEMENT (Precision / Recall / F1)
+   The unit of analysis is an annotated SPAN itself, not a text position.
+   One annotator is treated as the reference and the other as the system
+   being evaluated; spans are matched 1-to-1 between them, and unmatched
+   spans count as misses/false positives. A single long matched span and
+   a single short matched span both count as exactly ONE match — so this
+   view answers "how often do annotators agree a given annotation exists
+   at all", independent of how long any individual span is. Unlike
+   Krippendorff/Cohen, this is NOT chance-corrected, and it is inherently
+   pairwise (an annotator must be picked as reference), so for 3+
+   annotators it is reported per-pair, plus a macro-average.
 
-  span   Items are built by SEGMENTATION, not by collecting raw span
-         positions, and combine TWO kinds of segments:
+Together these two views answer different questions: (1) how much of the
+document's text do annotators agree on, weighted by coverage; (2) how often
+do annotators agree an annotation exists, weighted by count not length.
 
-         (1) POSITIVE segments — all span boundaries (start/end offsets)
-             drawn by ANY annotator for the label, in the document, are
-             used as cut points that partition the document into
-             contiguous segments:
+Matching criterion (applies to both views)
+-------------------------------------------
+  exact            A span/segment match requires identical (start, end).
+  fully_contained  A match is accepted if one span fully contains the
+                    other (handles minor boundary differences as agreement).
 
-                 [ann1]text1[ann2]text2[ann3]...
-
-             1=annotator's span covers the segment, 0=does not.
-
-         (2) GAP segments (fictional "NOT-label" class) — for EACH
-             annotator individually, their own gap intervals (the
-             complement of their own merged spans for the label) are
-             computed. These per-annotator gap-interval sets are then
-             pooled to build segments the same way. To keep polarity
-             consistent with the positive block (1=annotated, 0=not),
-             a gap segment scores 1 if the annotator actually labeled
-             it (i.e. it falls OUTSIDE their own gap interval) and 0 if
-             it falls INSIDE their gap interval. A mutual gap — both
-             annotators agree nothing is labeled there — therefore
-             correctly reads as 0-0, not 1-1. This avoids collapsing
-             every unannotated stretch into one giant shared region —
-             disagreement on exactly WHERE the gaps are is captured at
-             the same resolution as the positive label, instead of being
-             flattened into a single coarse "nobody annotated here" item.
-
-         Both kinds of segments become columns in the same matrix.
-
-         `criterion` currently only affects how POSITIVE boundaries are
-         collected:
-           exact            every distinct start/end offset is its own cut
-                            point.
-           fully_contained  boundaries strictly inside an already-canonical
-                            (wider) span from another annotator are
-                            dropped. NOTE: this can destroy small islands
-                            of perfect agreement nested inside a wider
-                            span from a different annotator — use with
-                            caution, `exact` is the safer default.
+Granularity (only affects the chance-corrected view)
+------------------------------------------------------
+  char   Each character position is one item. Slower, finest-grained.
+  word   Each whitespace-delimited word is one item. Faster, coarser.
+         `criterion` has no effect on char/word coverage checks — a span
+         either fully contains a token or it doesn't, regardless of
+         labelling it "exact" vs "fully_contained".
 
 Missing values (None)
----------------------
-An annotator gets None (excluded from all calculations) when they were not
-assigned to a document at all. This differs from 0, which means "assigned
-but did not label this item."
+----------------------
+An annotator is excluded (None) from an item only when they were not
+assigned to the document containing it at all. This differs from 0, which
+means "assigned, but did not annotate here."
 
 Usage
 -----
@@ -69,7 +55,7 @@ Usage
 
   Options:
     --criterion   exact | fully_contained  (default: exact)
-    --granularity char | word | span       (default: word)
+    --granularity char | word              (default: word)
     --output      path to JSON report      (default: iaa_report.json)
 """
 
@@ -84,11 +70,17 @@ from typing import Literal
 # Types
 # ---------------------------------------------------------------------------
 Criterion   = Literal["exact", "fully_contained"]
-Granularity = Literal["char", "word", "span"]
+Granularity = Literal["char", "word"]
+Span        = tuple[int, int, str]  # (start, end, label)
 
+
+# ===========================================================================
+# PART 1 — Chance-corrected agreement (Krippendorff's alpha, Cohen's kappa)
+#          via a char/word-level reliability matrix
+# ===========================================================================
 
 # ---------------------------------------------------------------------------
-# Tokenisation  (char / word granularity)
+# Tokenisation
 # ---------------------------------------------------------------------------
 
 def tokenize(text: str, granularity: Granularity) -> list[tuple[int, int]]:
@@ -97,10 +89,6 @@ def tokenize(text: str, granularity: Granularity) -> list[tuple[int, int]]:
         return [(i, i + 1) for i in range(len(text))]
     return [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
 
-
-# ---------------------------------------------------------------------------
-# Token coverage  (char / word granularity)
-# ---------------------------------------------------------------------------
 
 def token_is_covered(
     tok_start: int,
@@ -116,154 +104,11 @@ def token_is_covered(
     return False
 
 
-# ---------------------------------------------------------------------------
-# Boundary segmentation  (span granularity)
-# ---------------------------------------------------------------------------
-
-def build_segments(
-    doc_length: int,
-    ann_map: dict[str, list[dict]],
-    label: str,
-    criterion: Criterion,
-) -> list[tuple[int, int]]:
-    """
-    Collect every start/end boundary drawn by any annotator for *label* in
-    this document, use them as cut points, and partition [0, doc_length)
-    into contiguous, non-overlapping segments.
-
-    exact            Every distinct boundary offset is its own cut point.
-    fully_contained  Boundaries strictly inside an already-canonical
-                     (wider) span from another annotator are dropped, so
-                     near-identical spans collapse into one segment.
-
-    Segments with zero length (caused by duplicate boundaries, e.g. two
-    annotators using the exact same start/end) are skipped.
-    """
-    spans: list[tuple[int, int]] = []
-    for anns in ann_map.values():
-        for ann in anns:
-            if ann["label"] == label:
-                spans.append((ann["start"], ann["end"]))
-
-    if not spans:
-        # Nobody annotated this label in this doc — whole document is one
-        # shared 0 segment for every assigned annotator.
-        return [(0, doc_length)] if doc_length > 0 else []
-
-    if criterion == "fully_contained":
-        # Drop boundaries that fall strictly inside a wider span from
-        # another annotator, so minor boundary differences collapse.
-        spans_sorted = sorted(spans, key=lambda p: p[1] - p[0], reverse=True)
-        canonical: list[tuple[int, int]] = []
-        for s, e in spans_sorted:
-            absorbed = any(cs <= s and ce >= e for cs, ce in canonical)
-            if not absorbed:
-                canonical.append((s, e))
-        spans = canonical
-
-    boundaries = {0, doc_length}
-    for s, e in spans:
-        boundaries.add(max(0, min(s, doc_length)))
-        boundaries.add(max(0, min(e, doc_length)))
-
-    sorted_bounds = sorted(boundaries)
-    segments = [
-        (sorted_bounds[i], sorted_bounds[i + 1])
-        for i in range(len(sorted_bounds) - 1)
-        if sorted_bounds[i] < sorted_bounds[i + 1]
-    ]
-    return segments
-
-
-# ---------------------------------------------------------------------------
-# Per-annotator gap intervals  (the "NOT-label" fictional class)
-# ---------------------------------------------------------------------------
-
-def merged_covered_intervals(
-    annotations: list[dict],
-    label: str,
-) -> list[tuple[int, int]]:
-    """Merge an annotator's own (possibly overlapping) spans for *label*."""
-    ivs = sorted(
-        (ann["start"], ann["end"]) for ann in annotations if ann["label"] == label
-    )
-    merged: list[tuple[int, int]] = []
-    for s, e in ivs:
-        if merged and s <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-        else:
-            merged.append((s, e))
-    return merged
-
-
-def complement_intervals(
-    intervals: list[tuple[int, int]],
-    doc_length: int,
-) -> list[tuple[int, int]]:
-    """Return the gaps (complement) of a sorted, merged interval list."""
-    comp: list[tuple[int, int]] = []
-    prev = 0
-    for s, e in intervals:
-        if s > prev:
-            comp.append((prev, s))
-        prev = max(prev, e)
-    if prev < doc_length:
-        comp.append((prev, doc_length))
-    return comp
-
-
-def build_gap_segments(
-    doc_length: int,
-    ann_map: dict[str, list[dict]],
-    label: str,
-) -> tuple[list[tuple[int, int]], dict[str, list[tuple[int, int]]]]:
-    """
-    For each annotator, compute their own gap intervals (the complement of
-    their merged spans for *label*) — this is the "NOT-label" fictional
-    class, one distinct interval set PER annotator, not a single shared
-    leftover region.
-
-    All annotators' gap-interval boundaries are then pooled to build
-    segments, exactly like build_segments does for the positive label.
-    This lets disagreement on WHERE the gaps are (not just whether a gap
-    exists) be captured at the same resolution as the positive label.
-
-    Returns (segments, gaps_by_annotator).
-    """
-    gaps_by_annotator: dict[str, list[tuple[int, int]]] = {}
-    for annotator, anns in ann_map.items():
-        covered = merged_covered_intervals(anns, label)
-        gaps_by_annotator[annotator] = complement_intervals(covered, doc_length)
-
-    boundaries = {0, doc_length}
-    for ivs in gaps_by_annotator.values():
-        for s, e in ivs:
-            boundaries.add(max(0, min(s, doc_length)))
-            boundaries.add(max(0, min(e, doc_length)))
-
-    sorted_bounds = sorted(boundaries)
-    segments = [
-        (sorted_bounds[i], sorted_bounds[i + 1])
-        for i in range(len(sorted_bounds) - 1)
-        if sorted_bounds[i] < sorted_bounds[i + 1]
-    ]
-    return segments, gaps_by_annotator
-
-
-def gap_segment_covered(
-    seg_start: int,
-    seg_end: int,
-    gap_intervals: list[tuple[int, int]],
-) -> bool:
-    """True if one of this annotator's own gap intervals fully covers the segment."""
-    return any(gs <= seg_start and ge >= seg_end for gs, ge in gap_intervals)
-
-
 def build_token_matrix(
     documents: list[dict],
     label: str,
     annotators: list[str],
-    granularity: Granularity,   # "char" or "word"
+    granularity: Granularity,
 ) -> list[list[float | None]]:
     """
     Rows = annotators, Cols = one entry per token across all documents.
@@ -293,97 +138,17 @@ def build_token_matrix(
     return rows
 
 
-def build_span_matrix(
-    documents: list[dict],
-    label: str,
-    annotators: list[str],
-    criterion: Criterion,
-) -> list[list[float | None]]:
-    """
-    Item universe = two kinds of segments, concatenated as columns:
-
-    1. POSITIVE segments — the document cut at every boundary any
-       annotator drew for *label* (see build_segments). 1=annotator's
-       span covers the segment, 0=does not.
-
-    2. GAP segments — for each annotator, their own gap intervals (the
-       complement of their merged spans for *label*) form a distinct,
-       per-annotator "NOT-label" interval set. These interval sets are
-       pooled across annotators to build segments the same way, and
-       1=this annotator's OWN gap interval covers the segment, 0=does
-       not (meaning some part of an actual span intrudes there).
-
-       This avoids collapsing every unannotated stretch into one giant
-       shared region — disagreement on exactly WHERE the gaps are is
-       captured at the same resolution as the positive label, and
-       perfect-agreement islands inside a longer span (e.g. a small
-       span everyone nests inside a bigger one) are not destroyed by
-       indiscriminate merging.
-
-    Rows = annotators, Cols = positive segments ++ gap segments, all docs.
-    None = annotator not assigned to this document.
-    """
-    rows: list[list[float | None]] = [[] for _ in annotators]
-
-    for doc in documents:
-        text = doc["full_text"]
-        ann_map = {
-            str(asgn["annotator"]): asgn["annotations"]
-            for asgn in doc["assignments"]
-        }
-        assigned = set(ann_map.keys())
-
-        # --- positive segments ---
-        pos_segments = build_segments(len(text), ann_map, label, criterion)
-        for seg_start, seg_end in pos_segments:
-            for i, annotator in enumerate(annotators):
-                if annotator not in assigned:
-                    rows[i].append(None)
-                else:
-                    covered = token_is_covered(
-                        seg_start, seg_end, ann_map[annotator], label
-                    )
-                    rows[i].append(1.0 if covered else 0.0)
-
-        # --- gap segments (fictional "NOT-label" class) ---
-        # NOTE on polarity: gap_segment_covered() returning True means this
-        # annotator's gap interval covers the segment, i.e. they did NOT
-        # annotate there. To keep 1 meaning "annotated" and 0 meaning "gap"
-        # consistently across the whole matrix (so mutual gaps correctly
-        # read as 0-0, not 1-1), we INVERT the boolean here.
-        gap_segments, gaps_by_annotator = build_gap_segments(
-            len(text), ann_map, label
-        )
-        for seg_start, seg_end in gap_segments:
-            for i, annotator in enumerate(annotators):
-                if annotator not in assigned:
-                    rows[i].append(None)
-                else:
-                    is_gap = gap_segment_covered(
-                        seg_start, seg_end, gaps_by_annotator[annotator]
-                    )
-                    rows[i].append(0.0 if is_gap else 1.0)
-
-    return rows
-
-
-def build_reliability_matrix(
-    documents: list[dict],
-    label: str,
-    annotators: list[str],
-    granularity: Granularity,
-    criterion: Criterion,
-) -> list[list[float | None]]:
-    if granularity == "span":
-        return build_span_matrix(documents, label, annotators, criterion)
-    return build_token_matrix(documents, label, annotators, granularity)
-
-
 # ---------------------------------------------------------------------------
-# Krippendorff's Alpha  (nominal, missing-data-aware)
+# Krippendorff's Alpha  (nominal, missing-data-aware, hand-rolled)
 # ---------------------------------------------------------------------------
 
 def krippendorff_alpha(matrix: list[list[float | None]]) -> float | None:
+    """
+    Krippendorff's alpha with the nominal/binary distance metric
+    (delta = 0 if values match, 1 otherwise), computed directly from the
+    reliability matrix. Handles missing values (None) by excluding them
+    from both the observed and expected disagreement calculations.
+    """
     if not matrix or not matrix[0]:
         return None
 
@@ -424,13 +189,18 @@ def krippendorff_alpha(matrix: list[list[float | None]]) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Cohen's Kappa  (binary, pairwise)
+# Cohen's Kappa  (binary, pairwise, hand-rolled)
 # ---------------------------------------------------------------------------
 
 def cohen_kappa_pair(
     vals_a: list[float | None],
     vals_b: list[float | None],
 ) -> float | None:
+    """
+    Cohen's kappa between two annotators over a set of binary items. Items
+    where either annotator has None (not assigned to that document) are
+    excluded.
+    """
     paired = [(a, b) for a, b in zip(vals_a, vals_b)
               if a is not None and b is not None]
     if len(paired) < 2:
@@ -459,9 +229,132 @@ def cohen_kappa_all_pairs(
     }
 
 
-# ---------------------------------------------------------------------------
-# Span count helper
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# PART 2 — Span-matching agreement (Precision / Recall / F1)
+# ===========================================================================
+
+def spans_match(a: tuple[int, int], b: tuple[int, int], criterion: Criterion) -> bool:
+    """Whether two (start, end) spans count as the same annotation."""
+    a_s, a_e = a
+    b_s, b_e = b
+    if criterion == "exact":
+        return a_s == b_s and a_e == b_e
+    # fully_contained: one span must be a subset of the other
+    return (a_s >= b_s and a_e <= b_e) or (b_s >= a_s and b_e <= a_e)
+
+
+def match_span_sets(
+    spans_ref: list[tuple[int, int]],
+    spans_sys: list[tuple[int, int]],
+    criterion: Criterion,
+) -> tuple[int, int, int]:
+    """
+    Greedily match spans_sys against spans_ref (1-to-1, first-fit).
+
+    Returns (true_positives, ref_unmatched, sys_unmatched):
+      true_positives  number of matched pairs
+      ref_unmatched   reference spans with no match  (-> recall misses)
+      sys_unmatched   system spans with no match     (-> precision misses)
+    """
+    matched_ref: set[int] = set()
+    matched_sys: set[int] = set()
+
+    for i, rs in enumerate(spans_ref):
+        for j, ss in enumerate(spans_sys):
+            if j in matched_sys:
+                continue
+            if spans_match(rs, ss, criterion):
+                matched_ref.add(i)
+                matched_sys.add(j)
+                break
+
+    tp = len(matched_ref)
+    ref_unmatched = len(spans_ref) - tp
+    sys_unmatched = len(spans_sys) - tp
+    return tp, ref_unmatched, sys_unmatched
+
+
+def precision_recall_f1(
+    documents: list[dict],
+    label: str,
+    annotator_ref: str,
+    annotator_sys: str,
+    criterion: Criterion,
+) -> dict[str, float | None]:
+    """
+    Compute precision/recall/F1 for annotator_sys against annotator_ref,
+    for *label*, pooling matches across all documents both were assigned.
+    Each matched span counts as one unit regardless of its length.
+    """
+    total_tp = total_ref_unmatched = total_sys_unmatched = 0
+    n_docs_compared = 0
+
+    for doc in documents:
+        ann_map = {
+            str(asgn["annotator"]): asgn["annotations"]
+            for asgn in doc["assignments"]
+        }
+        if annotator_ref not in ann_map or annotator_sys not in ann_map:
+            continue
+        n_docs_compared += 1
+
+        spans_ref = [(a["start"], a["end"]) for a in ann_map[annotator_ref] if a["label"] == label]
+        spans_sys = [(a["start"], a["end"]) for a in ann_map[annotator_sys] if a["label"] == label]
+
+        tp, ref_un, sys_un = match_span_sets(spans_ref, spans_sys, criterion)
+        total_tp += tp
+        total_ref_unmatched += ref_un
+        total_sys_unmatched += sys_un
+
+    n_ref = total_tp + total_ref_unmatched
+    n_sys = total_tp + total_sys_unmatched
+
+    precision = total_tp / n_sys if n_sys > 0 else None
+    recall    = total_tp / n_ref if n_ref > 0 else None
+
+    if precision is not None and recall is not None and (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    elif precision == 0 or recall == 0:
+        f1 = 0.0
+    else:
+        f1 = None
+
+    return {
+        "true_positives":    total_tp,
+        "ref_span_count":    n_ref,
+        "sys_span_count":    n_sys,
+        "precision":         round(precision, 4) if precision is not None else None,
+        "recall":            round(recall, 4) if recall is not None else None,
+        "f1":                round(f1, 4) if f1 is not None else None,
+        "documents_compared": n_docs_compared,
+    }
+
+
+def span_matching_all_pairs(
+    documents: list[dict],
+    label: str,
+    annotators: list[str],
+    criterion: Criterion,
+) -> dict[str, dict]:
+    """
+    For every unordered annotator pair, compute precision/recall/F1 in
+    BOTH directions (each annotator taking a turn as reference), since
+    precision/recall are inherently asymmetric.
+    """
+    results: dict[str, dict] = {}
+    for i, j in itertools.combinations(range(len(annotators)), 2):
+        a, b = annotators[i], annotators[j]
+        key = f"annotator_{a}_vs_annotator_{b}"
+        results[key] = {
+            f"annotator_{a}_as_reference": precision_recall_f1(documents, label, a, b, criterion),
+            f"annotator_{b}_as_reference": precision_recall_f1(documents, label, b, a, criterion),
+        }
+    return results
+
+
+# ===========================================================================
+# Shared helpers
+# ===========================================================================
 
 def span_counts(
     documents: list[dict],
@@ -479,10 +372,6 @@ def span_counts(
     return counts
 
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-
 def load_data(path: str) -> tuple[list[str], list[str], list[dict]]:
     with open(path) as f:
         raw = json.load(f)
@@ -495,9 +384,9 @@ def load_data(path: str) -> tuple[list[str], list[str], list[dict]]:
     return labels, annotators, raw["documents"]
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Main computation
+# ===========================================================================
 
 def compute_iaa(
     input_path: str,
@@ -506,14 +395,6 @@ def compute_iaa(
 ) -> dict:
     labels, annotators, documents = load_data(input_path)
 
-    criterion_note = (
-        "criterion is not applicable at char/word granularity "
-        "(token containment is identical for both criteria)"
-        if granularity in ("char", "word") else
-        f"criterion='{criterion}' controls how span positions are matched "
-        "when building the candidate universe"
-    )
-
     results: dict = {
         "meta": {
             "input_file":    input_path,
@@ -521,21 +402,23 @@ def compute_iaa(
             "granularity":   granularity,
             "annotators":    [f"annotator_{a}" for a in annotators],
             "num_documents": len(documents),
-            "matrix_note": {
-                "char/word": (
-                    "Each token is one item. "
-                    "1=label covers token, 0=token not covered, None=doc not assigned."
+            "notes": {
+                "chance_corrected": (
+                    "Krippendorff's alpha and Cohen's kappa, computed on a "
+                    f"{granularity}-level reliability matrix. 1=token covered "
+                    "by label, 0=not covered, None=doc not assigned. "
+                    "LENGTH-WEIGHTED: agreement on long spans contributes more "
+                    "items than agreement on short spans."
                 ),
-                "span": (
-                    "Combines two segment types: (1) positive segments from "
-                    "cutting the document at every label boundary any annotator "
-                    "drew, 1=span covers segment; (2) gap segments built from "
-                    "each annotator's OWN complement intervals (per-annotator, "
-                    "not one shared blob), 1=annotator's own gap covers segment. "
-                    "None=doc not assigned."
+                "span_matching": (
+                    "Precision/Recall/F1 from matching whole spans between "
+                    "annotator pairs, using criterion="
+                    f"'{criterion}'. DECISION-WEIGHTED: each matched span "
+                    "counts as one unit regardless of its length. Not "
+                    "chance-corrected; reported per-pair since precision/"
+                    "recall are asymmetric (one annotator is the reference)."
                 ),
-            }[granularity if granularity in ("span",) else "char/word"],
-            "criterion_note": criterion_note,
+            },
         },
         "per_label": {},
         "summary": {},
@@ -543,24 +426,39 @@ def compute_iaa(
 
     alpha_values: list[float] = []
     kappa_values: list[float] = []
+    f1_values: list[float] = []
 
     for label in labels:
-        matrix = build_reliability_matrix(
-            documents, label, annotators, granularity, criterion
-        )
+        matrix = build_token_matrix(documents, label, annotators, granularity)
         n_items = len(matrix[0]) if matrix else 0
 
         alpha  = krippendorff_alpha(matrix)
         kappas = cohen_kappa_all_pairs(matrix, annotators)
         counts = span_counts(documents, label, annotators)
+        matching = span_matching_all_pairs(documents, label, annotators, criterion)
+
+        # Collect F1s for the label-level / overall macro average
+        label_f1s = [
+            direction_result["f1"]
+            for pair_result in matching.values()
+            for direction_result in pair_result.values()
+            if direction_result["f1"] is not None
+        ]
+        macro_f1 = round(sum(label_f1s) / len(label_f1s), 4) if label_f1s else None
 
         results["per_label"][label] = {
             "span_counts_per_annotator": counts,
-            "matrix_items": n_items,
-            "krippendorff_alpha": round(alpha, 4) if alpha is not None else None,
-            "cohen_kappa_pairs": {
-                k: round(v, 4) if v is not None else None
-                for k, v in kappas.items()
+            "chance_corrected": {
+                "matrix_items": n_items,
+                "krippendorff_alpha": round(alpha, 4) if alpha is not None else None,
+                "cohen_kappa_pairs": {
+                    k: round(v, 4) if v is not None else None
+                    for k, v in kappas.items()
+                },
+            },
+            "span_matching": {
+                "macro_f1": macro_f1,
+                "pairs": matching,
             },
         }
 
@@ -569,6 +467,8 @@ def compute_iaa(
         for v in kappas.values():
             if v is not None:
                 kappa_values.append(v)
+        if macro_f1 is not None:
+            f1_values.append(macro_f1)
 
     def safe_mean(lst):
         return round(sum(lst) / len(lst), 4) if lst else None
@@ -576,7 +476,8 @@ def compute_iaa(
     results["summary"] = {
         "mean_krippendorff_alpha":    safe_mean(alpha_values),
         "mean_cohen_kappa_all_pairs": safe_mean(kappa_values),
-        "interpretation_guide": {
+        "mean_f1_all_labels":         safe_mean(f1_values),
+        "interpretation_guide_alpha_kappa": {
             "< 0.20":      "Slight agreement",
             "0.21-0.40":   "Fair agreement",
             "0.41-0.60":   "Moderate agreement",
@@ -593,13 +494,12 @@ def main() -> None:
     )
     parser.add_argument("--input",       required=True)
     parser.add_argument("--criterion",   choices=["exact", "fully_contained"], default="exact")
-    parser.add_argument("--granularity", choices=["char", "word", "span"],     default="word")
+    parser.add_argument("--granularity", choices=["char", "word"],             default="word")
     parser.add_argument("--output",      default="iaa_report.json")
     args = parser.parse_args()
 
     print(f"Input        : {args.input}")
-    print(f"Criterion    : {args.criterion}"
-          + (" (n/a at char/word granularity)" if args.granularity != "span" else ""))
+    print(f"Criterion    : {args.criterion}")
     print(f"Granularity  : {args.granularity}")
     print(f"Output       : {args.output}")
     print()
@@ -616,19 +516,23 @@ def main() -> None:
     print(f"  Granularity         : {report['meta']['granularity']}")
     print(f"  Mean Krippendorff α : {report['summary']['mean_krippendorff_alpha']}")
     print(f"  Mean Cohen κ        : {report['summary']['mean_cohen_kappa_all_pairs']}")
+    print(f"  Mean F1 (macro)     : {report['summary']['mean_f1_all_labels']}")
     print()
 
-    col_w = 42
-    print(f"{'Label':<{col_w}} {'α':>8}  κ pairs")
-    print("-" * 100)
+    col_w = 38
+    print(f"{'Label':<{col_w}} {'α':>8}  {'macro F1':>9}   κ pairs")
+    print("-" * 110)
     for label, v in report["per_label"].items():
-        alpha_str = f"{v['krippendorff_alpha']:>8.4f}" if v["krippendorff_alpha"] is not None else "     N/A"
+        cc = v["chance_corrected"]
+        sm = v["span_matching"]
+        alpha_str = f"{cc['krippendorff_alpha']:>8.4f}" if cc["krippendorff_alpha"] is not None else "     N/A"
+        f1_str    = f"{sm['macro_f1']:>9.4f}" if sm["macro_f1"] is not None else "      N/A"
         kappa_parts = [
             f"{pk.replace('annotator_','').replace('_vs_',' vs ')}: "
             f"{pv:.4f}" if pv is not None else "N/A"
-            for pk, pv in v["cohen_kappa_pairs"].items()
+            for pk, pv in cc["cohen_kappa_pairs"].items()
         ]
-        print(f"{label:<{col_w}}{alpha_str}  {'  |  '.join(kappa_parts)}")
+        print(f"{label:<{col_w}}{alpha_str}  {f1_str}   {'  |  '.join(kappa_parts)}")
 
 
 if __name__ == "__main__":
