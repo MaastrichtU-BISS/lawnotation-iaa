@@ -16,19 +16,46 @@ Three granularity modes
          because the coverage check (span.start <= tok.start AND
          span.end >= tok.end) resolves identically for both criteria.
 
-  span   The item universe is the set of unique span positions (start, end)
-         seen across ALL annotators for a given label in a given document.
-         An annotator gets 1 for a candidate if they marked it, 0 if they
-         did not (meaning: this span boundary was discovered by a peer but
-         they chose not to use it — a principled, non-phantom zero).
-         Spans that no annotator marked never enter the universe, so there
-         are no invented items.
+  span   Items are built by SEGMENTATION, not by collecting raw span
+         positions, and combine TWO kinds of segments:
 
-         Here `criterion` is meaningful:
-           exact           (start, end) must match exactly.
-           fully_contained Two positions are merged into one candidate if
-                           one fully contains the other; the wider span
-                           becomes the canonical representative.
+         (1) POSITIVE segments — all span boundaries (start/end offsets)
+             drawn by ANY annotator for the label, in the document, are
+             used as cut points that partition the document into
+             contiguous segments:
+
+                 [ann1]text1[ann2]text2[ann3]...
+
+             1=annotator's span covers the segment, 0=does not.
+
+         (2) GAP segments (fictional "NOT-label" class) — for EACH
+             annotator individually, their own gap intervals (the
+             complement of their own merged spans for the label) are
+             computed. These per-annotator gap-interval sets are then
+             pooled to build segments the same way. To keep polarity
+             consistent with the positive block (1=annotated, 0=not),
+             a gap segment scores 1 if the annotator actually labeled
+             it (i.e. it falls OUTSIDE their own gap interval) and 0 if
+             it falls INSIDE their gap interval. A mutual gap — both
+             annotators agree nothing is labeled there — therefore
+             correctly reads as 0-0, not 1-1. This avoids collapsing
+             every unannotated stretch into one giant shared region —
+             disagreement on exactly WHERE the gaps are is captured at
+             the same resolution as the positive label, instead of being
+             flattened into a single coarse "nobody annotated here" item.
+
+         Both kinds of segments become columns in the same matrix.
+
+         `criterion` currently only affects how POSITIVE boundaries are
+         collected:
+           exact            every distinct start/end offset is its own cut
+                            point.
+           fully_contained  boundaries strictly inside an already-canonical
+                            (wider) span from another annotator are
+                            dropped. NOTE: this can destroy small islands
+                            of perfect agreement nested inside a wider
+                            span from a different annotator — use with
+                            caution, `exact` is the safer default.
 
 Missing values (None)
 ---------------------
@@ -90,59 +117,147 @@ def token_is_covered(
 
 
 # ---------------------------------------------------------------------------
-# Candidate span universe  (span granularity)
+# Boundary segmentation  (span granularity)
 # ---------------------------------------------------------------------------
 
-def build_span_universe(
+def build_segments(
+    doc_length: int,
     ann_map: dict[str, list[dict]],
     label: str,
     criterion: Criterion,
 ) -> list[tuple[int, int]]:
     """
-    Collect all unique (start, end) positions for *label* seen by any
-    annotator in this document.
+    Collect every start/end boundary drawn by any annotator for *label* in
+    this document, use them as cut points, and partition [0, doc_length)
+    into contiguous, non-overlapping segments.
 
-    exact            Each distinct (start, end) pair is its own candidate.
-    fully_contained  Positions where one contains the other are merged;
-                     the wider span becomes the canonical representative.
-                     Positions are processed largest-first so the wider
-                     span is always seen first.
+    exact            Every distinct boundary offset is its own cut point.
+    fully_contained  Boundaries strictly inside an already-canonical
+                     (wider) span from another annotator are dropped, so
+                     near-identical spans collapse into one segment.
+
+    Segments with zero length (caused by duplicate boundaries, e.g. two
+    annotators using the exact same start/end) are skipped.
     """
-    raw: list[tuple[int, int]] = []
+    spans: list[tuple[int, int]] = []
     for anns in ann_map.values():
         for ann in anns:
             if ann["label"] == label:
-                pos = (ann["start"], ann["end"])
-                if pos not in raw:
-                    raw.append(pos)
+                spans.append((ann["start"], ann["end"]))
 
-    if criterion == "exact" or not raw:
-        return raw
+    if not spans:
+        # Nobody annotated this label in this doc — whole document is one
+        # shared 0 segment for every assigned annotator.
+        return [(0, doc_length)] if doc_length > 0 else []
 
-    # fully_contained: merge positions where one contains the other
-    # Sort by span length descending so wider spans are canonical
-    raw_sorted = sorted(raw, key=lambda p: p[1] - p[0], reverse=True)
-    canonical: list[tuple[int, int]] = []
-    for pos in raw_sorted:
-        absorbed = False
-        for canon in canonical:
-            # pos is fully inside an already-canonical span
-            if canon[0] <= pos[0] and canon[1] >= pos[1]:
-                absorbed = True
-                break
-            # canon is fully inside pos — replace canon with pos (wider)
-            if pos[0] <= canon[0] and pos[1] >= canon[1]:
-                canonical[canonical.index(canon)] = pos
-                absorbed = True
-                break
-        if not absorbed:
-            canonical.append(pos)
-    return canonical
+    if criterion == "fully_contained":
+        # Drop boundaries that fall strictly inside a wider span from
+        # another annotator, so minor boundary differences collapse.
+        spans_sorted = sorted(spans, key=lambda p: p[1] - p[0], reverse=True)
+        canonical: list[tuple[int, int]] = []
+        for s, e in spans_sorted:
+            absorbed = any(cs <= s and ce >= e for cs, ce in canonical)
+            if not absorbed:
+                canonical.append((s, e))
+        spans = canonical
+
+    boundaries = {0, doc_length}
+    for s, e in spans:
+        boundaries.add(max(0, min(s, doc_length)))
+        boundaries.add(max(0, min(e, doc_length)))
+
+    sorted_bounds = sorted(boundaries)
+    segments = [
+        (sorted_bounds[i], sorted_bounds[i + 1])
+        for i in range(len(sorted_bounds) - 1)
+        if sorted_bounds[i] < sorted_bounds[i + 1]
+    ]
+    return segments
 
 
 # ---------------------------------------------------------------------------
-# Reliability matrix builders
+# Per-annotator gap intervals  (the "NOT-label" fictional class)
 # ---------------------------------------------------------------------------
+
+def merged_covered_intervals(
+    annotations: list[dict],
+    label: str,
+) -> list[tuple[int, int]]:
+    """Merge an annotator's own (possibly overlapping) spans for *label*."""
+    ivs = sorted(
+        (ann["start"], ann["end"]) for ann in annotations if ann["label"] == label
+    )
+    merged: list[tuple[int, int]] = []
+    for s, e in ivs:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def complement_intervals(
+    intervals: list[tuple[int, int]],
+    doc_length: int,
+) -> list[tuple[int, int]]:
+    """Return the gaps (complement) of a sorted, merged interval list."""
+    comp: list[tuple[int, int]] = []
+    prev = 0
+    for s, e in intervals:
+        if s > prev:
+            comp.append((prev, s))
+        prev = max(prev, e)
+    if prev < doc_length:
+        comp.append((prev, doc_length))
+    return comp
+
+
+def build_gap_segments(
+    doc_length: int,
+    ann_map: dict[str, list[dict]],
+    label: str,
+) -> tuple[list[tuple[int, int]], dict[str, list[tuple[int, int]]]]:
+    """
+    For each annotator, compute their own gap intervals (the complement of
+    their merged spans for *label*) — this is the "NOT-label" fictional
+    class, one distinct interval set PER annotator, not a single shared
+    leftover region.
+
+    All annotators' gap-interval boundaries are then pooled to build
+    segments, exactly like build_segments does for the positive label.
+    This lets disagreement on WHERE the gaps are (not just whether a gap
+    exists) be captured at the same resolution as the positive label.
+
+    Returns (segments, gaps_by_annotator).
+    """
+    gaps_by_annotator: dict[str, list[tuple[int, int]]] = {}
+    for annotator, anns in ann_map.items():
+        covered = merged_covered_intervals(anns, label)
+        gaps_by_annotator[annotator] = complement_intervals(covered, doc_length)
+
+    boundaries = {0, doc_length}
+    for ivs in gaps_by_annotator.values():
+        for s, e in ivs:
+            boundaries.add(max(0, min(s, doc_length)))
+            boundaries.add(max(0, min(e, doc_length)))
+
+    sorted_bounds = sorted(boundaries)
+    segments = [
+        (sorted_bounds[i], sorted_bounds[i + 1])
+        for i in range(len(sorted_bounds) - 1)
+        if sorted_bounds[i] < sorted_bounds[i + 1]
+    ]
+    return segments, gaps_by_annotator
+
+
+def gap_segment_covered(
+    seg_start: int,
+    seg_end: int,
+    gap_intervals: list[tuple[int, int]],
+) -> bool:
+    """True if one of this annotator's own gap intervals fully covers the segment."""
+    return any(gs <= seg_start and ge >= seg_end for gs, ge in gap_intervals)
+
 
 def build_token_matrix(
     documents: list[dict],
@@ -185,52 +300,69 @@ def build_span_matrix(
     criterion: Criterion,
 ) -> list[list[float | None]]:
     """
-    Item universe = union of (start, end) positions seen by any annotator,
-    per document. Spans seen by nobody are never added (no phantom zeros).
+    Item universe = two kinds of segments, concatenated as columns:
 
-    Rows = annotators, Cols = one entry per candidate span across all docs.
-    1.0  annotator marked this span position with this label
-    0.0  annotator was assigned this doc but did not mark this position
-         (the boundary was discovered by a peer — a principled zero)
-    None annotator not assigned to this document
+    1. POSITIVE segments — the document cut at every boundary any
+       annotator drew for *label* (see build_segments). 1=annotator's
+       span covers the segment, 0=does not.
+
+    2. GAP segments — for each annotator, their own gap intervals (the
+       complement of their merged spans for *label*) form a distinct,
+       per-annotator "NOT-label" interval set. These interval sets are
+       pooled across annotators to build segments the same way, and
+       1=this annotator's OWN gap interval covers the segment, 0=does
+       not (meaning some part of an actual span intrudes there).
+
+       This avoids collapsing every unannotated stretch into one giant
+       shared region — disagreement on exactly WHERE the gaps are is
+       captured at the same resolution as the positive label, and
+       perfect-agreement islands inside a longer span (e.g. a small
+       span everyone nests inside a bigger one) are not destroyed by
+       indiscriminate merging.
+
+    Rows = annotators, Cols = positive segments ++ gap segments, all docs.
+    None = annotator not assigned to this document.
     """
     rows: list[list[float | None]] = [[] for _ in annotators]
 
     for doc in documents:
+        text = doc["full_text"]
         ann_map = {
             str(asgn["annotator"]): asgn["annotations"]
             for asgn in doc["assignments"]
         }
-        universe = build_span_universe(ann_map, label, criterion)
-        if not universe:
-            continue
-
         assigned = set(ann_map.keys())
 
-        for (cand_start, cand_end) in universe:
+        # --- positive segments ---
+        pos_segments = build_segments(len(text), ann_map, label, criterion)
+        for seg_start, seg_end in pos_segments:
             for i, annotator in enumerate(annotators):
                 if annotator not in assigned:
                     rows[i].append(None)
                 else:
-                    # Check whether annotator marked this exact canonical position
-                    # (or a position that maps to it under fully_contained)
-                    hit = False
-                    for ann in ann_map[annotator]:
-                        if ann["label"] != label:
-                            continue
-                        a_s, a_e = ann["start"], ann["end"]
-                        if criterion == "exact":
-                            if a_s == cand_start and a_e == cand_end:
-                                hit = True
-                                break
-                        else:  # fully_contained
-                            # The annotator's span and the canonical span
-                            # overlap in containment
-                            if (cand_start <= a_s and cand_end >= a_e) or \
-                               (a_s <= cand_start and a_e >= cand_end):
-                                hit = True
-                                break
-                    rows[i].append(1.0 if hit else 0.0)
+                    covered = token_is_covered(
+                        seg_start, seg_end, ann_map[annotator], label
+                    )
+                    rows[i].append(1.0 if covered else 0.0)
+
+        # --- gap segments (fictional "NOT-label" class) ---
+        # NOTE on polarity: gap_segment_covered() returning True means this
+        # annotator's gap interval covers the segment, i.e. they did NOT
+        # annotate there. To keep 1 meaning "annotated" and 0 meaning "gap"
+        # consistently across the whole matrix (so mutual gaps correctly
+        # read as 0-0, not 1-1), we INVERT the boolean here.
+        gap_segments, gaps_by_annotator = build_gap_segments(
+            len(text), ann_map, label
+        )
+        for seg_start, seg_end in gap_segments:
+            for i, annotator in enumerate(annotators):
+                if annotator not in assigned:
+                    rows[i].append(None)
+                else:
+                    is_gap = gap_segment_covered(
+                        seg_start, seg_end, gaps_by_annotator[annotator]
+                    )
+                    rows[i].append(0.0 if is_gap else 1.0)
 
     return rows
 
@@ -395,9 +527,12 @@ def compute_iaa(
                     "1=label covers token, 0=token not covered, None=doc not assigned."
                 ),
                 "span": (
-                    "Each unique span position seen by at least one annotator is one item. "
-                    "1=annotator marked it, 0=annotator was assigned the doc but didn't mark it, "
-                    "None=doc not assigned. Spans seen by nobody are never added."
+                    "Combines two segment types: (1) positive segments from "
+                    "cutting the document at every label boundary any annotator "
+                    "drew, 1=span covers segment; (2) gap segments built from "
+                    "each annotator's OWN complement intervals (per-annotator, "
+                    "not one shared blob), 1=annotator's own gap covers segment. "
+                    "None=doc not assigned."
                 ),
             }[granularity if granularity in ("span",) else "char/word"],
             "criterion_note": criterion_note,
