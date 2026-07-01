@@ -1,47 +1,51 @@
 """
 Inter-Annotator Agreement for Span Annotations
 ================================================
-Reports TWO complementary views of agreement, computed per label:
+Reports THREE complementary views of agreement, computed per label:
 
-1. CHANCE-CORRECTED AGREEMENT (Krippendorff's alpha, Cohen's kappa)
-   Measured at char or word granularity. The unit of analysis is a
-   position in the text (a character or a word). This means agreement on
-   one long span contributes many agreeing items, while agreement on
-   several short spans contributes fewer — i.e. it is LENGTH-WEIGHTED.
-   Two annotators agreeing on one big 200-character span counts for more
-   than agreeing on ten separate 5-character spans. This is a deliberate,
-   well-understood property: it reflects how much of the *text* annotators
-   actually agree on, not how many *decisions* they made.
+1. COVERAGE AGREEMENT  (Krippendorff's alpha, Cohen's kappa — char/word)
+   "How much text do annotators agree on?"
+   The unit of analysis is a position in the text (a character or a word).
+   Agreement on one long span contributes many agreeing items, while
+   agreement on several short spans contributes fewer — i.e. it is
+   LENGTH-WEIGHTED. Two annotators agreeing on one big 200-character span
+   counts for more than agreeing on ten separate 5-character spans.
 
-2. SPAN-MATCHING AGREEMENT (Precision / Recall / F1)
-   The unit of analysis is an annotated SPAN itself, not a text position.
-   One annotator is treated as the reference and the other as the system
-   being evaluated; spans are matched 1-to-1 between them, and unmatched
-   spans count as misses/false positives. A single long matched span and
-   a single short matched span both count as exactly ONE match — so this
-   view answers "how often do annotators agree a given annotation exists
-   at all", independent of how long any individual span is. Unlike
-   Krippendorff/Cohen, this is NOT chance-corrected, and it is inherently
-   pairwise (an annotator must be picked as reference), so for 3+
-   annotators it is reported per-pair, plus a macro-average.
+2. DECISION AGREEMENT  (Krippendorff's alpha, Cohen's kappa — clusters)
+   "How often do annotators make the same annotation decisions, regardless
+   of span length?"
+   The unit of analysis is an ANNOTATION CLUSTER: all spans (from any
+   annotator) that touch or overlap each other are merged into one
+   contiguous block, and that whole block counts as exactly ONE item,
+   no matter how long it is. The gaps between clusters are also merged
+   into cluster-sized "negative" items, so 0-0 agreement is represented
+   without ever splitting it into many small pieces. A annotator scores
+   1 on a cluster if any of their own spans overlap it, 0 otherwise. This
+   removes length entirely from the calculation — one big agreed cluster
+   and one small agreed cluster both count as a single agreeing item.
 
-Together these two views answer different questions: (1) how much of the
-document's text do annotators agree on, weighted by coverage; (2) how often
-do annotators agree an annotation exists, weighted by count not length.
+3. SPAN MATCHING  (Precision / Recall / F1)
+   "If one annotator is treated as the reference, how accurately can
+   another annotator reproduce their annotations?"
+   The unit of analysis is a whole SPAN. One annotator is the reference,
+   the other is evaluated against it; spans are matched 1-to-1, and
+   unmatched spans count as misses/false positives. This is NOT
+   chance-corrected, and is inherently pairwise (an annotator must be
+   picked as reference), so it is reported per-pair, in both directions,
+   plus a macro-average.
 
-Matching criterion (applies to both views)
--------------------------------------------
-  exact            A span/segment match requires identical (start, end).
-  fully_contained  A match is accepted if one span fully contains the
-                    other (handles minor boundary differences as agreement).
+Matching criterion (applies to views 2 and 3)
+------------------------------------------------
+  exact            A match requires identical (start, end).
+  contained  A match is accepted if one span fully contains the
+                    other (treats minor boundary differences as agreement).
 
-Granularity (only affects the chance-corrected view)
-------------------------------------------------------
+Granularity (only affects view 1)
+------------------------------------
   char   Each character position is one item. Slower, finest-grained.
   word   Each whitespace-delimited word is one item. Faster, coarser.
-         `criterion` has no effect on char/word coverage checks — a span
-         either fully contains a token or it doesn't, regardless of
-         labelling it "exact" vs "fully_contained".
+         `criterion` has no effect here — a span either fully contains a
+         token or it doesn't, regardless of "exact" vs "contained".
 
 Missing values (None)
 ----------------------
@@ -54,7 +58,7 @@ Usage
   python iaa_spans.py --input data.json [options]
 
   Options:
-    --criterion   exact | fully_contained  (default: exact)
+    --criterion   exact | contained  (default: exact)
     --granularity char | word              (default: word)
     --output      path to JSON report      (default: iaa_report.json)
 """
@@ -69,85 +73,22 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
-Criterion   = Literal["exact", "fully_contained"]
+Criterion   = Literal["exact", "contained"]
 Granularity = Literal["char", "word"]
-Span        = tuple[int, int, str]  # (start, end, label)
 
 
 # ===========================================================================
-# PART 1 — Chance-corrected agreement (Krippendorff's alpha, Cohen's kappa)
-#          via a char/word-level reliability matrix
+# Shared agreement formulas — used by both view 1 (coverage) and
+# view 2 (decision), since both reduce to a binary reliability matrix.
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# Tokenisation
-# ---------------------------------------------------------------------------
-
-def tokenize(text: str, granularity: Granularity) -> list[tuple[int, int]]:
-    """Return (start, end) character offsets for each token."""
-    if granularity == "char":
-        return [(i, i + 1) for i in range(len(text))]
-    return [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
-
-
-def token_is_covered(
-    tok_start: int,
-    tok_end: int,
-    annotations: list[dict],
-    label: str,
-) -> bool:
-    """True if any annotation of *label* fully contains the token."""
-    for ann in annotations:
-        if ann["label"] == label:
-            if ann["start"] <= tok_start and ann["end"] >= tok_end:
-                return True
-    return False
-
-
-def build_token_matrix(
-    documents: list[dict],
-    label: str,
-    annotators: list[str],
-    granularity: Granularity,
-) -> list[list[float | None]]:
-    """
-    Rows = annotators, Cols = one entry per token across all documents.
-    1.0  annotator's span covers this token for this label
-    0.0  annotator worked on doc but did not cover the token
-    None annotator not assigned to this document
-    """
-    rows: list[list[float | None]] = [[] for _ in annotators]
-
-    for doc in documents:
-        text   = doc["full_text"]
-        tokens = tokenize(text, granularity)
-        ann_map = {
-            str(asgn["annotator"]): asgn["annotations"]
-            for asgn in doc["assignments"]
-        }
-        for tok_start, tok_end in tokens:
-            for i, annotator in enumerate(annotators):
-                if annotator not in ann_map:
-                    rows[i].append(None)
-                else:
-                    covered = token_is_covered(
-                        tok_start, tok_end, ann_map[annotator], label
-                    )
-                    rows[i].append(1.0 if covered else 0.0)
-
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Krippendorff's Alpha  (nominal, missing-data-aware, hand-rolled)
-# ---------------------------------------------------------------------------
 
 def krippendorff_alpha(matrix: list[list[float | None]]) -> float | None:
     """
     Krippendorff's alpha with the nominal/binary distance metric
-    (delta = 0 if values match, 1 otherwise), computed directly from the
-    reliability matrix. Handles missing values (None) by excluding them
-    from both the observed and expected disagreement calculations.
+    (delta = 0 if values match, 1 otherwise), computed directly from a
+    reliability matrix (rows = annotators, cols = items). Handles missing
+    values (None) by excluding them from both the observed and expected
+    disagreement calculations.
     """
     if not matrix or not matrix[0]:
         return None
@@ -188,10 +129,6 @@ def krippendorff_alpha(matrix: list[list[float | None]]) -> float | None:
     return 1.0 - Do / De
 
 
-# ---------------------------------------------------------------------------
-# Cohen's Kappa  (binary, pairwise, hand-rolled)
-# ---------------------------------------------------------------------------
-
 def cohen_kappa_pair(
     vals_a: list[float | None],
     vals_b: list[float | None],
@@ -230,7 +167,178 @@ def cohen_kappa_all_pairs(
 
 
 # ===========================================================================
-# PART 2 — Span-matching agreement (Precision / Recall / F1)
+# VIEW 1 — Coverage agreement: char/word reliability matrix
+# ===========================================================================
+
+def tokenize(text: str, granularity: Granularity) -> list[tuple[int, int]]:
+    """Return (start, end) character offsets for each token."""
+    if granularity == "char":
+        return [(i, i + 1) for i in range(len(text))]
+    return [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
+
+
+def token_is_covered(
+    tok_start: int,
+    tok_end: int,
+    annotations: list[dict],
+    label: str,
+) -> bool:
+    """True if any annotation of *label* fully contains the token."""
+    for ann in annotations:
+        if ann["label"] == label:
+            if ann["start"] <= tok_start and ann["end"] >= tok_end:
+                return True
+    return False
+
+
+def build_coverage_matrix(
+    documents: list[dict],
+    label: str,
+    annotators: list[str],
+    granularity: Granularity,
+) -> list[list[float | None]]:
+    """
+    Rows = annotators, Cols = one entry per token across all documents.
+    1.0  annotator's span covers this token for this label
+    0.0  annotator worked on doc but did not cover the token
+    None annotator not assigned to this document
+    """
+    rows: list[list[float | None]] = [[] for _ in annotators]
+
+    for doc in documents:
+        text   = doc["full_text"]
+        tokens = tokenize(text, granularity)
+        ann_map = {
+            str(asgn["annotator"]): asgn["annotations"]
+            for asgn in doc["assignments"]
+        }
+        for tok_start, tok_end in tokens:
+            for i, annotator in enumerate(annotators):
+                if annotator not in ann_map:
+                    rows[i].append(None)
+                else:
+                    covered = token_is_covered(
+                        tok_start, tok_end, ann_map[annotator], label
+                    )
+                    rows[i].append(1.0 if covered else 0.0)
+
+    return rows
+
+
+# ===========================================================================
+# VIEW 2 — Decision agreement: cluster-based reliability matrix
+# ===========================================================================
+
+def build_clusters(
+    doc_length: int,
+    ann_map: dict[str, list[dict]],
+    label: str,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """
+    Build the decision-item universe for one document and one label.
+
+    POSITIVE clusters: merge every span (from ANY annotator) for *label*
+    that touches or overlaps another into one contiguous block. Each
+    cluster is exactly one item, regardless of how long it is or how many
+    individual spans (from how many annotators) fed into it. An annotator
+    scores 1 on a cluster if any of their own spans overlap it.
+
+    NEGATIVE clusters: the gaps between positive clusters (and before the
+    first / after the last). These are 0-0-0 for every annotator BY
+    CONSTRUCTION — no span from anyone touches them, since if one did it
+    would already have been absorbed into a positive cluster. This avoids
+    representing "no annotation here" as a single document-spanning blob
+    (too coarse) or as one item per token (reintroduces length-weighting)
+    — gaps are chunked at the same cluster granularity as real decisions.
+
+    Returns (positive_clusters, negative_clusters).
+    """
+    spans: list[tuple[int, int]] = []
+    for anns in ann_map.values():
+        for ann in anns:
+            if ann["label"] == label:
+                spans.append((ann["start"], ann["end"]))
+
+    spans.sort()
+    positive: list[tuple[int, int]] = []
+    for s, e in spans:
+        if positive and s <= positive[-1][1]:
+            positive[-1] = (positive[-1][0], max(positive[-1][1], e))
+        else:
+            positive.append((s, e))
+
+    negative: list[tuple[int, int]] = []
+    prev = 0
+    for s, e in positive:
+        if s > prev:
+            negative.append((prev, s))
+        prev = e
+    if prev < doc_length:
+        negative.append((prev, doc_length))
+
+    return positive, negative
+
+
+def cluster_is_covered(
+    cluster_start: int,
+    cluster_end: int,
+    annotations: list[dict],
+    label: str,
+    criterion: Criterion,
+) -> bool:
+    """True if any of the annotator's spans for *label* matches the cluster per criterion."""
+    for ann in annotations:
+        if ann["label"] != label:
+            continue
+        a_s, a_e = ann["start"], ann["end"]
+        if criterion == "exact":
+            if a_s == cluster_start and a_e == cluster_end:
+                return True
+        else:  # contained: any overlap is accepted
+            if a_s < cluster_end and a_e > cluster_start:
+                return True
+    return False
+
+
+def build_decision_matrix(
+    documents: list[dict],
+    label: str,
+    annotators: list[str],
+    criterion: Criterion,
+) -> list[list[float | None]]:
+    """
+    Rows = annotators, Cols = one entry per cluster (positive + negative)
+    across all documents.
+    1.0  annotator has a span overlapping this cluster
+    0.0  annotator was assigned the doc but has no span overlapping it
+         (true for ALL annotators on negative clusters, by construction)
+    None annotator not assigned to this document
+    """
+    rows: list[list[float | None]] = [[] for _ in annotators]
+
+    for doc in documents:
+        text = doc["full_text"]
+        ann_map = {
+            str(asgn["annotator"]): asgn["annotations"]
+            for asgn in doc["assignments"]
+        }
+        assigned = set(ann_map.keys())
+
+        positive, negative = build_clusters(len(text), ann_map, label)
+
+        for cs, ce in positive + negative:
+            for i, annotator in enumerate(annotators):
+                if annotator not in assigned:
+                    rows[i].append(None)
+                else:
+                    covered = cluster_is_covered(cs, ce, ann_map[annotator], label, criterion)
+                    rows[i].append(1.0 if covered else 0.0)
+
+    return rows
+
+
+# ===========================================================================
+# VIEW 3 — Span matching: Precision / Recall / F1
 # ===========================================================================
 
 def spans_match(a: tuple[int, int], b: tuple[int, int], criterion: Criterion) -> bool:
@@ -239,7 +347,7 @@ def spans_match(a: tuple[int, int], b: tuple[int, int], criterion: Criterion) ->
     b_s, b_e = b
     if criterion == "exact":
         return a_s == b_s and a_e == b_e
-    # fully_contained: one span must be a subset of the other
+    # contained: one span must be a subset of the other
     return (a_s >= b_s and a_e <= b_e) or (b_s >= a_s and b_e <= a_e)
 
 
@@ -403,20 +511,30 @@ def compute_iaa(
             "annotators":    [f"annotator_{a}" for a in annotators],
             "num_documents": len(documents),
             "notes": {
-                "chance_corrected": (
-                    "Krippendorff's alpha and Cohen's kappa, computed on a "
+                "coverage_agreement": (
+                    "Krippendorff's alpha / Cohen's kappa on a "
                     f"{granularity}-level reliability matrix. 1=token covered "
                     "by label, 0=not covered, None=doc not assigned. "
                     "LENGTH-WEIGHTED: agreement on long spans contributes more "
-                    "items than agreement on short spans."
+                    "items than agreement on short spans. Answers: how much "
+                    "text do annotators agree on?"
+                ),
+                "decision_agreement": (
+                    "Krippendorff's alpha / Cohen's kappa on a cluster-level "
+                    "reliability matrix. Overlapping spans from any annotator "
+                    "are merged into single clusters (positive = annotated by "
+                    "someone, negative = annotated by no one), each cluster "
+                    "counting as exactly one item regardless of length. "
+                    "DECISION-WEIGHTED. Answers: how often do annotators make "
+                    "the same annotation decisions, regardless of span length?"
                 ),
                 "span_matching": (
                     "Precision/Recall/F1 from matching whole spans between "
-                    "annotator pairs, using criterion="
-                    f"'{criterion}'. DECISION-WEIGHTED: each matched span "
-                    "counts as one unit regardless of its length. Not "
-                    "chance-corrected; reported per-pair since precision/"
-                    "recall are asymmetric (one annotator is the reference)."
+                    f"annotator pairs, using criterion='{criterion}'. Not "
+                    "chance-corrected; reported per-pair in both directions "
+                    "since precision/recall are asymmetric. Answers: if one "
+                    "annotator is the reference, how accurately can another "
+                    "reproduce their annotations?"
                 ),
             },
         },
@@ -424,20 +542,27 @@ def compute_iaa(
         "summary": {},
     }
 
-    alpha_values: list[float] = []
-    kappa_values: list[float] = []
-    f1_values: list[float] = []
+    cov_alpha_values:  list[float] = []
+    cov_kappa_values:  list[float] = []
+    dec_alpha_values:  list[float] = []
+    dec_kappa_values:  list[float] = []
+    f1_values:         list[float] = []
 
     for label in labels:
-        matrix = build_token_matrix(documents, label, annotators, granularity)
-        n_items = len(matrix[0]) if matrix else 0
-
-        alpha  = krippendorff_alpha(matrix)
-        kappas = cohen_kappa_all_pairs(matrix, annotators)
         counts = span_counts(documents, label, annotators)
-        matching = span_matching_all_pairs(documents, label, annotators, criterion)
 
-        # Collect F1s for the label-level / overall macro average
+        # --- View 1: coverage agreement ---
+        cov_matrix = build_coverage_matrix(documents, label, annotators, granularity)
+        cov_alpha  = krippendorff_alpha(cov_matrix)
+        cov_kappas = cohen_kappa_all_pairs(cov_matrix, annotators)
+
+        # --- View 2: decision agreement ---
+        dec_matrix = build_decision_matrix(documents, label, annotators, criterion)
+        dec_alpha  = krippendorff_alpha(dec_matrix)
+        dec_kappas = cohen_kappa_all_pairs(dec_matrix, annotators)
+
+        # --- View 3: span matching ---
+        matching = span_matching_all_pairs(documents, label, annotators, criterion)
         label_f1s = [
             direction_result["f1"]
             for pair_result in matching.values()
@@ -448,12 +573,20 @@ def compute_iaa(
 
         results["per_label"][label] = {
             "span_counts_per_annotator": counts,
-            "chance_corrected": {
-                "matrix_items": n_items,
-                "krippendorff_alpha": round(alpha, 4) if alpha is not None else None,
+            "coverage_agreement": {
+                "matrix_items": len(cov_matrix[0]) if cov_matrix else 0,
+                "krippendorff_alpha": round(cov_alpha, 4) if cov_alpha is not None else None,
                 "cohen_kappa_pairs": {
                     k: round(v, 4) if v is not None else None
-                    for k, v in kappas.items()
+                    for k, v in cov_kappas.items()
+                },
+            },
+            "decision_agreement": {
+                "matrix_items": len(dec_matrix[0]) if dec_matrix else 0,
+                "krippendorff_alpha": round(dec_alpha, 4) if dec_alpha is not None else None,
+                "cohen_kappa_pairs": {
+                    k: round(v, 4) if v is not None else None
+                    for k, v in dec_kappas.items()
                 },
             },
             "span_matching": {
@@ -462,11 +595,16 @@ def compute_iaa(
             },
         }
 
-        if alpha is not None:
-            alpha_values.append(alpha)
-        for v in kappas.values():
+        if cov_alpha is not None:
+            cov_alpha_values.append(cov_alpha)
+        for v in cov_kappas.values():
             if v is not None:
-                kappa_values.append(v)
+                cov_kappa_values.append(v)
+        if dec_alpha is not None:
+            dec_alpha_values.append(dec_alpha)
+        for v in dec_kappas.values():
+            if v is not None:
+                dec_kappa_values.append(v)
         if macro_f1 is not None:
             f1_values.append(macro_f1)
 
@@ -474,9 +612,17 @@ def compute_iaa(
         return round(sum(lst) / len(lst), 4) if lst else None
 
     results["summary"] = {
-        "mean_krippendorff_alpha":    safe_mean(alpha_values),
-        "mean_cohen_kappa_all_pairs": safe_mean(kappa_values),
-        "mean_f1_all_labels":         safe_mean(f1_values),
+        "coverage_agreement": {
+            "mean_krippendorff_alpha":    safe_mean(cov_alpha_values),
+            "mean_cohen_kappa_all_pairs": safe_mean(cov_kappa_values),
+        },
+        "decision_agreement": {
+            "mean_krippendorff_alpha":    safe_mean(dec_alpha_values),
+            "mean_cohen_kappa_all_pairs": safe_mean(dec_kappa_values),
+        },
+        "span_matching": {
+            "mean_f1_all_labels": safe_mean(f1_values),
+        },
         "interpretation_guide_alpha_kappa": {
             "< 0.20":      "Slight agreement",
             "0.21-0.40":   "Fair agreement",
@@ -493,7 +639,7 @@ def main() -> None:
         description="Inter-annotator agreement for span annotations."
     )
     parser.add_argument("--input",       required=True)
-    parser.add_argument("--criterion",   choices=["exact", "fully_contained"], default="exact")
+    parser.add_argument("--criterion",   choices=["exact", "contained"], default="exact")
     parser.add_argument("--granularity", choices=["char", "word"],             default="word")
     parser.add_argument("--output",      default="iaa_report.json")
     args = parser.parse_args()
@@ -510,29 +656,30 @@ def main() -> None:
         json.dump(report, f, indent=2)
 
     print(f"Report written to: {args.output}\n")
+
+    s = report["summary"]
     print("=== SUMMARY ===")
-    print(f"  Documents           : {report['meta']['num_documents']}")
-    print(f"  Annotators          : {', '.join(report['meta']['annotators'])}")
-    print(f"  Granularity         : {report['meta']['granularity']}")
-    print(f"  Mean Krippendorff α : {report['summary']['mean_krippendorff_alpha']}")
-    print(f"  Mean Cohen κ        : {report['summary']['mean_cohen_kappa_all_pairs']}")
-    print(f"  Mean F1 (macro)     : {report['summary']['mean_f1_all_labels']}")
+    print(f"  Documents                          : {report['meta']['num_documents']}")
+    print(f"  Annotators                         : {', '.join(report['meta']['annotators'])}")
+    print(f"  Granularity (coverage view)        : {report['meta']['granularity']}")
+    print(f"  Coverage agreement  - mean α        : {s['coverage_agreement']['mean_krippendorff_alpha']}")
+    print(f"  Coverage agreement  - mean κ         : {s['coverage_agreement']['mean_cohen_kappa_all_pairs']}")
+    print(f"  Decision agreement  - mean α        : {s['decision_agreement']['mean_krippendorff_alpha']}")
+    print(f"  Decision agreement  - mean κ         : {s['decision_agreement']['mean_cohen_kappa_all_pairs']}")
+    print(f"  Span matching       - mean F1       : {s['span_matching']['mean_f1_all_labels']}")
     print()
 
-    col_w = 38
-    print(f"{'Label':<{col_w}} {'α':>8}  {'macro F1':>9}   κ pairs")
-    print("-" * 110)
+    col_w = 34
+    print(f"{'Label':<{col_w}} {'cov α':>8} {'dec α':>8} {'F1':>8}")
+    print("-" * 65)
     for label, v in report["per_label"].items():
-        cc = v["chance_corrected"]
-        sm = v["span_matching"]
-        alpha_str = f"{cc['krippendorff_alpha']:>8.4f}" if cc["krippendorff_alpha"] is not None else "     N/A"
-        f1_str    = f"{sm['macro_f1']:>9.4f}" if sm["macro_f1"] is not None else "      N/A"
-        kappa_parts = [
-            f"{pk.replace('annotator_','').replace('_vs_',' vs ')}: "
-            f"{pv:.4f}" if pv is not None else "N/A"
-            for pk, pv in cc["cohen_kappa_pairs"].items()
-        ]
-        print(f"{label:<{col_w}}{alpha_str}  {f1_str}   {'  |  '.join(kappa_parts)}")
+        cov_a = v["coverage_agreement"]["krippendorff_alpha"]
+        dec_a = v["decision_agreement"]["krippendorff_alpha"]
+        f1    = v["span_matching"]["macro_f1"]
+        cov_str = f"{cov_a:>8.4f}" if cov_a is not None else "     N/A"
+        dec_str = f"{dec_a:>8.4f}" if dec_a is not None else "     N/A"
+        f1_str  = f"{f1:>8.4f}" if f1 is not None else "     N/A"
+        print(f"{label:<{col_w}}{cov_str}{dec_str}{f1_str}")
 
 
 if __name__ == "__main__":
