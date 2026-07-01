@@ -1,5 +1,0 @@
-# Word-level inter-annotator agreement
-python iaa.py --input input/data.json --granularity word --output output/report-word.json
-
-# Span-level inter-annotator agreement
-python iaa.py --input input/data.json --criterion fully_contained --granularity span --output output/report-span.json
