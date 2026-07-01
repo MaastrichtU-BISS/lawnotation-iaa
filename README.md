@@ -212,9 +212,9 @@ View 3 matches spans 1-to-1 with a greedy first-fit strategy (for each reference
 
 `contained` in View 3 accepts a match if either span is a subset of the other: `[a,b] ⊆ [c,d]` **or** `[c,d] ⊆ [a,b]`. This means a very long span and a very short span will match, as long as one contains the other. Depending on your use case, you may want a stricter definition (e.g. requiring the system span to be contained within the reference, not the other way around).
 
-### 4. Negative clusters inflate agreement scores in View 2
+### 4. Negative clusters — bounded to one item per document
 
-Negative clusters (unannotated gaps) always score `0` for every annotator — they are agreements by construction. In documents with large unannotated sections, this systematically inflates both α and κ for View 2, since it adds many items on which all annotators trivially agree. This effect is inherent in any binary reliability approach for sparse annotations.
+All unannotated gaps in a document are collapsed into a **single negative item** rather than one item per gap. This means a document with many sparse annotations adds at most one trivial `0-0` agreement item regardless of how many gaps it contains, keeping the influence of "no annotation here" proportional to the number of documents rather than the sparsity of the labels.
 
 ### 5. Cohen's κ is computed per pair, not multi-annotator
 

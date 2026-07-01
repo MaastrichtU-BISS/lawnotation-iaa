@@ -233,7 +233,7 @@ def build_clusters(
     doc_length: int,
     ann_map: dict[str, list[dict]],
     label: str,
-) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+) -> tuple[list[tuple[int, int]], bool]:
     """
     Build the decision-item universe for one document and one label.
 
@@ -243,15 +243,13 @@ def build_clusters(
     individual spans (from how many annotators) fed into it. An annotator
     scores 1 on a cluster if any of their own spans overlap it.
 
-    NEGATIVE clusters: the gaps between positive clusters (and before the
-    first / after the last). These are 0-0-0 for every annotator BY
-    CONSTRUCTION — no span from anyone touches them, since if one did it
-    would already have been absorbed into a positive cluster. This avoids
-    representing "no annotation here" as a single document-spanning blob
-    (too coarse) or as one item per token (reintroduces length-weighting)
-    — gaps are chunked at the same cluster granularity as real decisions.
+    NEGATIVE item: a single boolean flag indicating whether any unannotated
+    region exists in this document. All gaps are collapsed into ONE item,
+    regardless of how many gaps there are or how long they are. This
+    prevents sparse annotations from generating many trivial 0-0-0 items
+    that inflate alpha and kappa.
 
-    Returns (positive_clusters, negative_clusters).
+    Returns (positive_clusters, has_negative).
     """
     spans: list[tuple[int, int]] = []
     for anns in ann_map.values():
@@ -267,16 +265,11 @@ def build_clusters(
         else:
             positive.append((s, e))
 
-    negative: list[tuple[int, int]] = []
-    prev = 0
-    for s, e in positive:
-        if s > prev:
-            negative.append((prev, s))
-        prev = e
-    if prev < doc_length:
-        negative.append((prev, doc_length))
+    # Is there any unannotated region in the document?
+    covered_length = sum(e - s for s, e in positive)
+    has_negative = covered_length < doc_length
 
-    return positive, negative
+    return positive, has_negative
 
 
 def cluster_is_covered(
@@ -307,12 +300,12 @@ def build_decision_matrix(
     criterion: Criterion,
 ) -> list[list[float | None]]:
     """
-    Rows = annotators, Cols = one entry per cluster (positive + negative)
-    across all documents.
-    1.0  annotator has a span overlapping this cluster
-    0.0  annotator was assigned the doc but has no span overlapping it
-         (true for ALL annotators on negative clusters, by construction)
-    None annotator not assigned to this document
+    Rows = annotators, Cols = one entry per cluster across all documents.
+    Positive clusters: 1.0 if the annotator has a matching span, 0.0 if not, None if not assigned.
+    Negative item (one per document, if any unannotated region exists):
+      always 0.0 for assigned annotators (by construction), None if not assigned.
+    Using a single negative item per document prevents sparse annotations
+    from producing many trivial 0-0 agreements that inflate alpha/kappa.
     """
     rows: list[list[float | None]] = [[] for _ in annotators]
 
@@ -324,15 +317,20 @@ def build_decision_matrix(
         }
         assigned = set(ann_map.keys())
 
-        positive, negative = build_clusters(len(text), ann_map, label)
+        positive, has_negative = build_clusters(len(text), ann_map, label)
 
-        for cs, ce in positive + negative:
+        for cs, ce in positive:
             for i, annotator in enumerate(annotators):
                 if annotator not in assigned:
                     rows[i].append(None)
                 else:
                     covered = cluster_is_covered(cs, ce, ann_map[annotator], label, criterion)
                     rows[i].append(1.0 if covered else 0.0)
+
+        # One single negative item per document (all assigned annotators score 0)
+        if has_negative:
+            for i, annotator in enumerate(annotators):
+                rows[i].append(None if annotator not in assigned else 0.0)
 
     return rows
 
