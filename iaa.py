@@ -12,14 +12,13 @@ Reports THREE complementary views of agreement, computed per label:
    counts for more than agreeing on ten separate 5-character spans.
 
 2. DECISION AGREEMENT  (Krippendorff's alpha, Cohen's kappa — clusters)
-   "How often do annotators make the same annotation decisions, regardless
-   of span length?"
+   "How consistently do annotators agree on annotation decisions?"
    The unit of analysis is an ANNOTATION CLUSTER: all spans (from any
    annotator) that touch or overlap each other are merged into one
    contiguous block, and that whole block counts as exactly ONE item,
-   no matter how long it is. The gaps between clusters are also merged
-   into cluster-sized "negative" items, so 0-0 agreement is represented
-   without ever splitting it into many small pieces. A annotator scores
+   no matter how long it is. For each positive cluster one negative item
+   is added, keeping a 1:1 balance between annotated and unannotated
+   decisions and avoiding label-prevalence bias. An annotator scores
    1 on a cluster if any of their own spans overlap it, 0 otherwise. This
    removes length entirely from the calculation — one big agreed cluster
    and one small agreed cluster both count as a single agreeing item.
@@ -230,26 +229,16 @@ def build_coverage_matrix(
 # ===========================================================================
 
 def build_clusters(
-    doc_length: int,
     ann_map: dict[str, list[dict]],
     label: str,
-) -> tuple[list[tuple[int, int]], bool]:
+) -> list[tuple[int, int]]:
     """
-    Build the decision-item universe for one document and one label.
-
-    POSITIVE clusters: merge every span (from ANY annotator) for *label*
-    that touches or overlaps another into one contiguous block. Each
-    cluster is exactly one item, regardless of how long it is or how many
-    individual spans (from how many annotators) fed into it. An annotator
-    scores 1 on a cluster if any of their own spans overlap it.
-
-    NEGATIVE item: a single boolean flag indicating whether any unannotated
-    region exists in this document. All gaps are collapsed into ONE item,
-    regardless of how many gaps there are or how long they are. This
-    prevents sparse annotations from generating many trivial 0-0-0 items
-    that inflate alpha and kappa.
-
-    Returns (positive_clusters, has_negative).
+    Merge every span (from ANY annotator) for *label* that touches or
+    overlaps another into one contiguous positive cluster. Each cluster
+    counts as exactly one item regardless of length. Unannotated regions
+    are not represented — the matrix only contains items where at least
+    one annotator made a decision, keeping the metric focused on
+    annotation consistency rather than being distorted by label prevalence.
     """
     spans: list[tuple[int, int]] = []
     for anns in ann_map.values():
@@ -265,11 +254,7 @@ def build_clusters(
         else:
             positive.append((s, e))
 
-    # Is there any unannotated region in the document?
-    covered_length = sum(e - s for s, e in positive)
-    has_negative = covered_length < doc_length
-
-    return positive, has_negative
+    return positive
 
 
 def cluster_is_covered(
@@ -300,24 +285,25 @@ def build_decision_matrix(
     criterion: Criterion,
 ) -> list[list[float | None]]:
     """
-    Rows = annotators, Cols = one entry per cluster across all documents.
-    Positive clusters: 1.0 if the annotator has a matching span, 0.0 if not, None if not assigned.
-    Negative item (one per document, if any unannotated region exists):
-      always 0.0 for assigned annotators (by construction), None if not assigned.
-    Using a single negative item per document prevents sparse annotations
-    from producing many trivial 0-0 agreements that inflate alpha/kappa.
+    Rows = annotators, Cols = positive clusters + balanced negative items.
+    1.0  annotator has a span matching this cluster (per criterion)
+    0.0  annotator was assigned to the doc but has no matching span
+    None annotator not assigned to this document
+    For each positive cluster one negative item (all 0s) is added, keeping
+    the ratio of annotated-to-unannotated decisions at exactly 1:1 per
+    document. This avoids both inflation (from too many trivial 0-0 items
+    in sparse labels) and deflation (from no baseline of non-annotation).
     """
     rows: list[list[float | None]] = [[] for _ in annotators]
 
     for doc in documents:
-        text = doc["full_text"]
         ann_map = {
             str(asgn["annotator"]): asgn["annotations"]
             for asgn in doc["assignments"]
         }
         assigned = set(ann_map.keys())
 
-        positive, has_negative = build_clusters(len(text), ann_map, label)
+        positive = build_clusters(ann_map, label)
 
         for cs, ce in positive:
             for i, annotator in enumerate(annotators):
@@ -327,8 +313,10 @@ def build_decision_matrix(
                     covered = cluster_is_covered(cs, ce, ann_map[annotator], label, criterion)
                     rows[i].append(1.0 if covered else 0.0)
 
-        # One single negative item per document (all assigned annotators score 0)
-        if has_negative:
+        # Add one negative item per positive cluster (1:1 ratio).
+        # This balances "decided to annotate" vs "decided not to annotate"
+        # decisions without letting label sparsity inflate agreement.
+        for _ in positive:
             for i, annotator in enumerate(annotators):
                 rows[i].append(None if annotator not in assigned else 0.0)
 
@@ -520,11 +508,12 @@ def compute_iaa(
                 "decision_agreement": (
                     "Krippendorff's alpha / Cohen's kappa on a cluster-level "
                     "reliability matrix. Overlapping spans from any annotator "
-                    "are merged into single clusters (positive = annotated by "
-                    "someone, negative = annotated by no one), each cluster "
-                    "counting as exactly one item regardless of length. "
-                    "DECISION-WEIGHTED. Answers: how often do annotators make "
-                    "the same annotation decisions, regardless of span length?"
+                    "are merged into single positive clusters, each counting "
+                    "as exactly one item regardless of length. One negative "
+                    "(0-0) item is added per positive cluster, keeping a 1:1 "
+                    "balance between annotated and unannotated decisions. "
+                    "DECISION-WEIGHTED. Answers: how consistently do annotators "
+                    "agree on annotation decisions, regardless of span length?"
                 ),
                 "span_matching": (
                     "Precision/Recall/F1 from matching whole spans between "

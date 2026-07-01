@@ -38,7 +38,7 @@ All spans from all annotators that touch or overlap each other for a given label
 
 **Metrics:** Krippendorff's α and Cohen's κ (all pairs).
 
-**Key property:** **Length-neutral** — a 3-word cluster and a 300-word cluster both count as one decision. Use it to answer "how often do annotators agree on *whether* to annotate a region, ignoring span size?"
+**Key property:** **Length-neutral** — a 3-word cluster and a 300-word cluster both count as one decision. For each positive cluster, one negative item is added, keeping a strict **1:1 ratio** of annotated vs unannotated decisions per document. This avoids both inflation from too many trivial 0-0 items (sparse labels) and deflation from having no non-annotation baseline. Use it to answer "how consistently do annotators agree on annotation decisions, regardless of span length?"
 
 ---
 
@@ -123,9 +123,6 @@ python iaa.py --input <path/to/data.json> [options]
 ### Examples
 
 ```bash
-# Word-level coverage, exact span matching
-python iaa.py --input input/data.json --output output/report-word.json
-
 # Word-level coverage, lenient (containment) matching
 python iaa.py --input input/data.json --criterion contained --granularity word --output output/report-word-contained.json
 
@@ -212,9 +209,9 @@ View 3 matches spans 1-to-1 with a greedy first-fit strategy (for each reference
 
 `contained` in View 3 accepts a match if either span is a subset of the other: `[a,b] ⊆ [c,d]` **or** `[c,d] ⊆ [a,b]`. This means a very long span and a very short span will match, as long as one contains the other. Depending on your use case, you may want a stricter definition (e.g. requiring the system span to be contained within the reference, not the other way around).
 
-### 4. Negative clusters — bounded to one item per document
+### 4. Negative items are balanced 1:1 with positive clusters in View 2
 
-All unannotated gaps in a document are collapsed into a **single negative item** rather than one item per gap. This means a document with many sparse annotations adds at most one trivial `0-0` agreement item regardless of how many gaps it contains, keeping the influence of "no annotation here" proportional to the number of documents rather than the sparsity of the labels.
+For every positive cluster in a document, exactly one negative item (all 0s) is added. This keeps the ratio of annotated vs unannotated decisions at 1:1 regardless of label prevalence, avoiding inflation from many trivial 0-0 items in sparse labels while retaining a non-annotation baseline so the metric does not deflate when annotators frequently annotate different regions.
 
 ### 5. Cohen's κ is computed per pair, not multi-annotator
 
