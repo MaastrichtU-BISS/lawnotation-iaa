@@ -9,13 +9,6 @@ Criterion   = Literal["exact", "contained"]
 Granularity = Literal["char", "word"]
 
 def krippendorff_alpha(matrix: list[list[float | None]]) -> float | None:
-    """
-    Krippendorff's alpha with the nominal/binary distance metric
-    (delta = 0 if values match, 1 otherwise), computed directly from a
-    reliability matrix (rows = annotators, cols = items). Handles missing
-    values (None) by excluding them from both the observed and expected
-    disagreement calculations.
-    """
     if not matrix or not matrix[0]:
         return None
 
@@ -89,7 +82,6 @@ def cohen_kappa_all_pairs(
 
 
 def tokenize(text: str, granularity: Granularity) -> list[tuple[int, int]]:
-    """Return (start, end) character offsets for each token."""
     if granularity == "char":
         return [(i, i + 1) for i in range(len(text))]
     return [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
