@@ -5,7 +5,6 @@ package main
 import (
 	"archive/zip"
 	"encoding/csv"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -57,16 +56,49 @@ func docAnnotators(doc Document) []string {
 	return result
 }
 
-// labelCSVBytes generates CSV content for one document+label.
-func labelCSVBytes(doc Document, label string, annotators []string, criterion, granularity string) []byte {
-	docs := []Document{doc}
+// stripExt removes the file extension from a name (e.g. "doc.txt" → "doc").
+func stripExt(name string) string {
+	if ext := filepath.Ext(name); ext != "" {
+		return name[:len(name)-len(ext)]
+	}
+	return name
+}
+
+// metricsCSV generates metrics.csv content for a set of documents and a single label.
+func metricsCSV(docs []Document, label string, annotators []string, criterion, granularity string) []byte {
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
+
+	_ = w.Write([]string{"GENERAL"})
+	annCounts := map[string]int{}
+	for _, doc := range docs {
+		for _, asgn := range doc.Assignments {
+			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
+			for _, ann := range asgn.Annotations {
+				if ann.Label == label {
+					annCounts[annotatorID]++
+				}
+			}
+		}
+	}
+	_ = w.Write([]string{"label", label})
+	if len(docs) == 1 {
+		_ = w.Write([]string{"document", stripExt(docs[0].Name)})
+	} else {
+		_ = w.Write([]string{"num_documents", fmt.Sprintf("%d", len(docs))})
+	}
+	_ = w.Write([]string{"granularity", granularity})
+	_ = w.Write([]string{"criterion", criterion})
+	_ = w.Write([]string{"spans_per_annotator"})
+	for _, annotator := range annotators {
+		count := annCounts[annotator]
+		_ = w.Write([]string{"annotator_" + annotator, fmt.Sprintf("%d", count)})
+	}
+	_ = w.Write([]string{""})
 
 	// — Span Matching —
 	_ = w.Write([]string{"SPAN MATCHING"})
 	_ = w.Write([]string{"pair", "direction", "tp", "ref_count", "sys_count", "precision", "recall", "f1"})
-
 	pairs := spanMatchingAllPairs(docs, label, annotators, criterion)
 	pairKeys := make([]string, 0, len(pairs))
 	for k := range pairs {
@@ -94,18 +126,29 @@ func labelCSVBytes(doc Document, label string, annotators []string, criterion, g
 		}
 	}
 
+	// macro F1 (mean across all pair directions)
+	pairs2 := spanMatchingAllPairs(docs, label, annotators, criterion)
+	var f1vals []float64
+	for _, pairResult := range pairs2 {
+		for _, dir := range pairResult {
+			if dir.F1.Valid {
+				f1vals = append(f1vals, dir.F1.Value)
+			}
+		}
+	}
+	macroF1 := safeMean(f1vals)
+	_ = w.Write([]string{"macro_f1", nullFloatStr(macroF1)})
 	_ = w.Write([]string{""})
 
 	// — Coverage Agreement —
 	_ = w.Write([]string{"COVERAGE AGREEMENT"})
-	_ = w.Write([]string{"metric", "value"})
-
 	covMatrix := buildCoverageMatrix(docs, label, annotators, granularity)
+	_ = w.Write([]string{"matrix_items", fmt.Sprintf("%d", len(covMatrix[1]))})
 	covAlpha := krippendorffAlpha(covMatrix)
 	covKappas := cohenKappaAllPairs(covMatrix, annotators)
 
 	_ = w.Write([]string{"krippendorff_alpha", nullFloatStr(covAlpha)})
-
+	_ = w.Write([]string{"cohen_kappa_pairs"})
 	kappaKeys := make([]string, 0, len(covKappas))
 	for k := range covKappas {
 		kappaKeys = append(kappaKeys, k)
@@ -115,6 +158,54 @@ func labelCSVBytes(doc Document, label string, annotators []string, criterion, g
 		_ = w.Write([]string{k, nullFloatStr(covKappas[k])})
 	}
 
+	w.Flush()
+	return []byte(buf.String())
+}
+
+// labelAnnotationsCSV generates annotations.csv content for one document+label.
+func labelAnnotationsCSV(doc Document, label string) []byte {
+	var buf strings.Builder
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{"annotator", "start", "end", "text"})
+	for _, asgn := range doc.Assignments {
+		annotatorID := fmt.Sprintf("%v", asgn.Annotator)
+		for _, ann := range asgn.Annotations {
+			if ann.Label == label {
+				_ = w.Write([]string{
+					annotatorID,
+					fmt.Sprintf("%d", ann.Start),
+					fmt.Sprintf("%d", ann.End),
+					ann.Text,
+				})
+			}
+		}
+	}
+	w.Flush()
+	return []byte(buf.String())
+}
+
+// aggregatedAnnotationsCSV generates annotations.csv for a label across all documents,
+// with an additional "document" column identifying the source document.
+func aggregatedAnnotationsCSV(documents []Document, label string) []byte {
+	var buf strings.Builder
+	w := csv.NewWriter(&buf)
+	_ = w.Write([]string{"document", "annotator", "start", "end", "text"})
+	for _, doc := range documents {
+		for _, asgn := range doc.Assignments {
+			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
+			for _, ann := range asgn.Annotations {
+				if ann.Label == label {
+					_ = w.Write([]string{
+						stripExt(doc.Name),
+						annotatorID,
+						fmt.Sprintf("%d", ann.Start),
+						fmt.Sprintf("%d", ann.End),
+						ann.Text,
+					})
+				}
+			}
+		}
+	}
 	w.Flush()
 	return []byte(buf.String())
 }
@@ -190,45 +281,64 @@ func main() {
 	zw := zip.NewWriter(zipFile)
 	defer zw.Close()
 
-	// Write aggregate JSON into zip
-	aggEntry, err := zw.Create("aggregate.json")
-	if err != nil {
-		log.Fatalf("error creating aggregate.json in zip: %v", err)
-	}
-	enc := json.NewEncoder(aggEntry)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(report); err != nil {
-		log.Fatalf("error encoding aggregate JSON: %v", err)
-	}
-
 	// Per-document CSVs
 	fmt.Printf("Processing %d documents...\n", len(documents))
 	for i, doc := range documents {
 		printProgress(i+1, len(documents), doc.Name)
 
-		docName := sanitizeName(doc.Name)
+		docName := sanitizeName(stripExt(doc.Name))
 		if docName == "" {
 			docName = fmt.Sprintf("document_%d", i+1)
 		}
 		docAnns := docAnnotators(doc)
 
 		for _, label := range labels {
-			entryPath := fmt.Sprintf("documents/%s/%s.csv", docName, sanitizeName(label))
-			csvEntry, err := zw.Create(entryPath)
+			labelDir := fmt.Sprintf("documents/%s/%s", docName, sanitizeName(label))
+
+			metricsEntry, err := zw.Create(labelDir + "/metrics.csv")
 			if err != nil {
-				log.Fatalf("error creating zip entry %s: %v", entryPath, err)
+				log.Fatalf("error creating %s/metrics.csv: %v", labelDir, err)
 			}
-			data := labelCSVBytes(doc, label, docAnns, *criterion, *granularity)
-			if _, err := csvEntry.Write(data); err != nil {
-				log.Fatalf("error writing CSV entry: %v", err)
+			if _, err := metricsEntry.Write(metricsCSV([]Document{doc}, label, docAnns, *criterion, *granularity)); err != nil {
+				log.Fatalf("error writing metrics CSV: %v", err)
+			}
+
+			annotationsEntry, err := zw.Create(labelDir + "/annotations.csv")
+			if err != nil {
+				log.Fatalf("error creating %s/annotations.csv: %v", labelDir, err)
+			}
+			if _, err := annotationsEntry.Write(labelAnnotationsCSV(doc, label)); err != nil {
+				log.Fatalf("error writing annotations CSV: %v", err)
 			}
 		}
 	}
 	fmt.Fprintln(os.Stderr) // end progress bar line
 
+	// aggregated folder: location=root computed over all documents
+	_, allAnnotators, _, _ := loadData(*input)
+	for _, label := range labels {
+		aggDir := fmt.Sprintf("aggregated/%s", sanitizeName(label))
+
+		aggMetrics, err := zw.Create(aggDir + "/metrics.csv")
+		if err != nil {
+			log.Fatalf("error creating %s/metrics.csv: %v", aggDir, err)
+		}
+		if _, err := aggMetrics.Write(metricsCSV(documents, label, allAnnotators, *criterion, *granularity)); err != nil {
+			log.Fatalf("error writing aggregated metrics CSV: %v", err)
+		}
+
+		aggAnnotations, err := zw.Create(aggDir + "/annotations.csv")
+		if err != nil {
+			log.Fatalf("error creating %s/annotations.csv: %v", aggDir, err)
+		}
+		if _, err := aggAnnotations.Write(aggregatedAnnotationsCSV(documents, label)); err != nil {
+			log.Fatalf("error writing aggregated annotations CSV: %v", err)
+		}
+	}
+
 	fmt.Printf("\nReport written to: %s\n", *output)
-	fmt.Printf("  aggregate.json\n")
-	fmt.Printf("  documents/{name}/{label}.csv  (%d documents × %d labels)\n\n",
+	fmt.Printf("  aggregated/{label}/metrics.csv + annotations.csv\n")
+	fmt.Printf("  documents/{doc}/{label}/metrics.csv + annotations.csv  (%d documents × %d labels)\n\n",
 		len(documents), len(labels))
 
 	// Summary table
@@ -266,13 +376,13 @@ func main() {
 
 		f1Str, covStr, kappaStr := "     N/A", "     N/A", "     N/A"
 		if f1Val.Valid {
-			f1Str = fmt.Sprintf("%8.4f", f1Val.Value)
+			f1Str = fmt.Sprintf("%.4f", f1Val.Value)
 		}
 		if covA.Valid {
-			covStr = fmt.Sprintf("%8.4f", covA.Value)
+			covStr = fmt.Sprintf("%.4f", covA.Value)
 		}
 		if meanKappa.Valid {
-			kappaStr = fmt.Sprintf("%8.4f", meanKappa.Value)
+			kappaStr = fmt.Sprintf("%.4f", meanKappa.Value)
 		}
 		fmt.Printf("%-*s%s%s%s\n", colW, label, f1Str, covStr, kappaStr)
 	}

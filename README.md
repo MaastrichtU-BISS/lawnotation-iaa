@@ -149,27 +149,21 @@ Acts                               0.7900   0.7654   0.7500
 **ZIP contents:**
 ```
 report.zip
-├── aggregate.json              # Full report across all documents
-│   ├── meta/                   # Run parameters and methodology notes
-│   ├── per_label/
-│   │   └── <label>/
-│   │       ├── span_counts_per_annotator
-│   │       ├── span_matching/
-│   │       │   ├── macro_f1
-│   │       │   └── pairs/
-│   │       │       └── annotator_X_vs_annotator_Y/
-│   │       │           ├── annotator_X_as_reference  (precision, recall, f1)
-│   │       │           └── annotator_Y_as_reference  (precision, recall, f1)
-│   │       └── coverage_agreement/
-│   │           ├── krippendorff_alpha
-│   │           └── cohen_kappa_pairs/
-│   └── summary/                # Macro-averages across all labels + interpretation guide
+├── aggregate.json                        # Full aggregated report (JSON)
 └── documents/
-    └── <document_name>/
-        └── <label>.csv         # Per-document metrics for each label
+    ├── _aggregated/                      # Metrics and annotations across all documents
+    │   └── <label>/
+    │       ├── metrics.csv              # Aggregate span matching + coverage for this label
+    │       └── annotations.csv          # All annotations for this label (+ document column)
+    └── <document_name>/                  # File extension stripped (e.g. doc.txt → doc)
+        └── <label>/
+            ├── metrics.csv              # Span matching + coverage metrics for this label
+            └── annotations.csv          # All annotations for this label by each annotator
 ```
 
-Each per-document CSV has two sections — **SPAN MATCHING** (one row per annotator pair and direction) and **COVERAGE AGREEMENT** (alpha and kappa values) — importable directly into Excel or any spreadsheet tool.
+**metrics.csv** columns: `pair, direction, tp, ref_count, sys_count, precision, recall, f1` (span matching section) followed by `metric, value` (coverage section with Krippendorff α and Cohen κ).
+
+**annotations.csv** columns: `annotator, start, end, text` (per-document) or `document, annotator, start, end, text` (aggregated).
 
 ### Score interpretation guide (α and κ)
 

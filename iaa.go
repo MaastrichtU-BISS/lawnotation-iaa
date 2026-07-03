@@ -20,6 +20,7 @@ type Annotation struct {
 	Start int    `json:"start"`
 	End   int    `json:"end"`
 	Label string `json:"label"`
+	Text  string `json:"text"`
 }
 
 type Assignment struct {
