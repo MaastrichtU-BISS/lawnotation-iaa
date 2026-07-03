@@ -1,6 +1,6 @@
 # IAA — Inter-Annotator Agreement for Span Annotations
 
-A zero-dependency Python tool that measures how consistently multiple annotators mark up text spans across a shared document set. Designed for use with [LawNotation](https://lawnotation.org) exports, but compatible with any dataset that follows the same JSON schema.
+A zero-dependency Go tool that measures how consistently multiple annotators mark up text spans across a shared document set. Designed for use with [LawNotation](https://lawnotation.org) exports, but compatible with any dataset that follows the same JSON schema.
 
 ---
 
@@ -96,24 +96,31 @@ The tool reads a JSON file exported from LawNotation. The expected top-level str
 ## Usage
 
 ```bash
-python iaa.py --input <path/to/data.json> [options]
+go run main.go iaa.go --input <path/to/data.json> [options]
 ```
 
 | Option | Values | Default | Description |
 |--------|--------|---------|-------------|
 | `--input` | path | *(required)* | Path to the LawNotation JSON export |
-| `--criterion` | `exact` \| `contained` | `exact` | Match condition for Views 2 and 3 |
-| `--granularity` | `char` \| `word` | `word` | Token unit for View 1 |
-| `--output` | path | `iaa_report.json` | Output path for the JSON report |
+| `--criterion` | `exact` \| `contained` | `exact` | Match condition for View 1 |
+| `--granularity` | `char` \| `word` | `word` | Token unit for View 2 |
+| `--output` | path | `iaa_report.zip` | Output path for the ZIP report |
 
 ### Examples
 
 ```bash
 # Word-level coverage, lenient (containment) matching
-python iaa.py --input input/data.json --criterion contained --granularity word --output output/report-word-contained.json
+go run main.go iaa.go --input input/data.json --criterion contained --granularity word --output output/report.zip
 
 # Character-level coverage (slower, finer-grained)
-python iaa.py --input input/data.json --granularity char --output output/report-char.json
+go run main.go iaa.go --input input/data.json --granularity char --output output/report-char.zip
+```
+
+To build a standalone binary instead of using `go run`:
+
+```bash
+go build -o iaa main.go iaa.go
+./iaa --input input/data.json --criterion contained --output output/report.zip
 ```
 
 ---
@@ -139,24 +146,30 @@ Acts                               0.7900   0.7654   0.7500
 ...
 ```
 
-**JSON report structure:**
+**ZIP contents:**
 ```
-report.json
-├── meta/               # Run parameters and methodology notes
-├── per_label/
-│   └── <label>/
-│       ├── span_counts_per_annotator
-│       ├── span_matching/
-│       │   ├── macro_f1
-│       │   └── pairs/
-│       │       └── annotator_X_vs_annotator_Y/
-│       │           ├── annotator_X_as_reference  (precision, recall, f1)
-│       │           └── annotator_Y_as_reference  (precision, recall, f1)
-│       └── coverage_agreement/
-│           ├── krippendorff_alpha
-│           └── cohen_kappa_pairs/
-└── summary/            # Macro-averages across all labels + interpretation guide
+report.zip
+├── aggregate.json              # Full report across all documents
+│   ├── meta/                   # Run parameters and methodology notes
+│   ├── per_label/
+│   │   └── <label>/
+│   │       ├── span_counts_per_annotator
+│   │       ├── span_matching/
+│   │       │   ├── macro_f1
+│   │       │   └── pairs/
+│   │       │       └── annotator_X_vs_annotator_Y/
+│   │       │           ├── annotator_X_as_reference  (precision, recall, f1)
+│   │       │           └── annotator_Y_as_reference  (precision, recall, f1)
+│   │       └── coverage_agreement/
+│   │           ├── krippendorff_alpha
+│   │           └── cohen_kappa_pairs/
+│   └── summary/                # Macro-averages across all labels + interpretation guide
+└── documents/
+    └── <document_name>/
+        └── <label>.csv         # Per-document metrics for each label
 ```
+
+Each per-document CSV has two sections — **SPAN MATCHING** (one row per annotator pair and direction) and **COVERAGE AGREEMENT** (alpha and kappa values) — importable directly into Excel or any spreadsheet tool.
 
 ### Score interpretation guide (α and κ)
 
@@ -172,6 +185,6 @@ report.json
 
 ## Dependencies
 
-None. Standard library only (`argparse`, `itertools`, `json`, `math`, `re`). Requires Python 3.10+.
+None. Standard library only (`archive/zip`, `encoding/csv`, `encoding/json`, `flag`, `math`, `os`, `regexp`, `sort`, `strings`). Requires Go 1.18+.
 
 ---
