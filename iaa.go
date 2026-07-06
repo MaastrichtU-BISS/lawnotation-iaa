@@ -135,6 +135,12 @@ type Report struct {
 // Krippendorff's alpha
 // ---------------------------------------------------------------------------
 
+// krippendorffAlpha computes Krippendorff's alpha using the interval/quadratic
+// distance function delta(a,b) = (a-b)^2. Alpha is invariant to any constant
+// scaling of delta, so this is equivalent to a normalized quadratic weight
+// (e.g. 1 - d^2/(q-1)^2) without needing to hardcode the category count q.
+// For binary (0/1) data — the coverage-agreement view — this reduces exactly
+// to the nominal metric, since (0-1)^2 = 1 and (0-0)^2 = (1-1)^2 = 0.
 func krippendorffAlpha(matrix [][]*float64) NullFloat64 {
 	if len(matrix) == 0 || len(matrix[0]) == 0 {
 		return noFloat()
@@ -161,9 +167,8 @@ func krippendorffAlpha(matrix [][]*float64) NullFloat64 {
 		allVals = append(allVals, colVals...)
 		for i := 0; i < mU; i++ {
 			for j := i + 1; j < mU; j++ {
-				if colVals[i] != colVals[j] {
-					doNum += 1.0
-				}
+				d := colVals[i] - colVals[j]
+				doNum += d * d
 				doDen += 1.0
 			}
 		}
@@ -182,11 +187,21 @@ func krippendorffAlpha(matrix [][]*float64) NullFloat64 {
 	for _, v := range allVals {
 		catCounts[v]++
 	}
-	sumSq := 0.0
-	for _, c := range catCounts {
-		sumSq += c * (c - 1)
+	cats := make([]float64, 0, len(catCounts))
+	for c := range catCounts {
+		cats = append(cats, c)
 	}
-	De := 1.0 - sumSq/(n*(n-1))
+	deSum := 0.0
+	for _, c := range cats {
+		for _, k := range cats {
+			if c == k {
+				continue
+			}
+			d := c - k
+			deSum += catCounts[c] * catCounts[k] * d * d
+		}
+	}
+	De := deSum / (n * (n - 1))
 
 	if De == 0.0 {
 		if Do == 0.0 {
