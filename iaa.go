@@ -24,8 +24,9 @@ type Annotation struct {
 }
 
 type Assignment struct {
-	Annotator   interface{}  `json:"annotator"` // int or string in the wild
-	Annotations []Annotation `json:"annotations"`
+	Annotator        interface{}  `json:"annotator"` // int or string in the wild
+	DifficultyRating int          `json:"difficulty_rating"`
+	Annotations      []Annotation `json:"annotations"`
 }
 
 type Document struct {
@@ -311,6 +312,66 @@ func buildCoverageMatrix(documents []Document, label string, annotators []string
 		}
 	}
 	return rows
+}
+
+// ---------------------------------------------------------------------------
+// Difficulty rating agreement
+// ---------------------------------------------------------------------------
+
+// buildDifficultyMatrix returns an annotators x documents reliability matrix
+// of difficulty_rating values. A value of 0 (unrated) or a missing assignment
+// is represented as nil (missing), matching buildCoverageMatrix's convention.
+func buildDifficultyMatrix(documents []Document, annotators []string) [][]*float64 {
+	rows := make([][]*float64, len(annotators))
+	for i := range rows {
+		rows[i] = make([]*float64, len(documents))
+	}
+	for docIdx, doc := range documents {
+		ratings := map[string]int{}
+		for _, asgn := range doc.Assignments {
+			ratings[fmt.Sprintf("%v", asgn.Annotator)] = asgn.DifficultyRating
+		}
+		for i, annotator := range annotators {
+			if r, ok := ratings[annotator]; ok && r >= 1 && r <= 5 {
+				rows[i][docIdx] = ptr(float64(r))
+			}
+		}
+	}
+	return rows
+}
+
+type DifficultyRatingSummary struct {
+	Total  int
+	Rated  int
+	Mean   NullFloat64
+	Counts map[int]int // keys 1..5
+	Alpha  NullFloat64
+}
+
+// difficultyRatingSummary computes total/rated counts, the star histogram,
+// mean rating (over rated assignments only), and Krippendorff's alpha across
+// annotators for the difficulty_rating field over the given documents.
+func difficultyRatingSummary(documents []Document, annotators []string) DifficultyRatingSummary {
+	total := 0
+	counts := map[int]int{1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+	var ratedVals []float64
+	for _, doc := range documents {
+		for _, asgn := range doc.Assignments {
+			total++
+			r := asgn.DifficultyRating
+			if r >= 1 && r <= 5 {
+				counts[r]++
+				ratedVals = append(ratedVals, float64(r))
+			}
+		}
+	}
+	return DifficultyRatingSummary{
+		Total:  total,
+		Rated:  len(ratedVals),
+		Mean:   safeMean(ratedVals),
+		Counts: counts,
+		Alpha:  krippendorffAlpha(buildDifficultyMatrix(documents, annotators)),
+	}
 }
 
 // ---------------------------------------------------------------------------

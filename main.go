@@ -157,6 +157,18 @@ func metricsCSV(docs []Document, label string, annotators []string, criterion, g
 	for _, k := range kappaKeys {
 		_ = w.Write([]string{k, nullFloatStr(covKappas[k])})
 	}
+	_ = w.Write([]string{""})
+
+	// — Difficulty Rating —
+	_ = w.Write([]string{"DIFFICULTY RATING"})
+	diff := difficultyRatingSummary(docs, annotators)
+	_ = w.Write([]string{"total", fmt.Sprintf("%d", diff.Total)})
+	_ = w.Write([]string{"rated", fmt.Sprintf("%d", diff.Rated)})
+	_ = w.Write([]string{"mean", nullFloatStr(diff.Mean)})
+	for star := 1; star <= 5; star++ {
+		_ = w.Write([]string{fmt.Sprintf("star_%d", star), fmt.Sprintf("%d", diff.Counts[star])})
+	}
+	_ = w.Write([]string{"krippendorff_alpha", nullFloatStr(diff.Alpha)})
 
 	w.Flush()
 	return []byte(buf.String())
