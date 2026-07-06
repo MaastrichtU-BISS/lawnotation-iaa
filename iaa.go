@@ -175,12 +175,15 @@ func krippendorffAlpha(matrix [][]*float64) NullFloat64 {
 		return noFloat()
 	}
 
-	c1 := 0.0
+	catCounts := map[float64]float64{}
 	for _, v := range allVals {
-		c1 += v
+		catCounts[v]++
 	}
-	c0 := n - c1
-	De := 2.0 * c1 * c0 / (n * (n - 1))
+	sumSq := 0.0
+	for _, c := range catCounts {
+		sumSq += c * (c - 1)
+	}
+	De := 1.0 - sumSq/(n*(n-1))
 
 	if De == 0.0 {
 		if Do == 0.0 {
