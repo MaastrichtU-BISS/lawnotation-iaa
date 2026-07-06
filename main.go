@@ -65,7 +65,12 @@ func stripExt(name string) string {
 }
 
 // metricsCSV generates metrics.csv content for a set of documents and a single label.
-func metricsCSV(docs []Document, label string, annotators []string, criterion, granularity string) []byte {
+// For annotationLevel=="document" data (annotations with no real span extent),
+// Span Matching is not applicable and is omitted; Coverage Agreement becomes a
+// document-level label-presence agreement instead of token coverage.
+func metricsCSV(docs []Document, label string, annotators []string, criterion, granularity, annotationLevel string) []byte {
+	isDocumentLevel := annotationLevel == "document"
+
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
 
@@ -87,8 +92,14 @@ func metricsCSV(docs []Document, label string, annotators []string, criterion, g
 	} else {
 		_ = w.Write([]string{"num_documents", fmt.Sprintf("%d", len(docs))})
 	}
-	_ = w.Write([]string{"granularity", granularity})
-	_ = w.Write([]string{"criterion", criterion})
+	_ = w.Write([]string{"annotation_level", annotationLevel})
+	if isDocumentLevel {
+		_ = w.Write([]string{"granularity", "N/A"})
+		_ = w.Write([]string{"criterion", "N/A"})
+	} else {
+		_ = w.Write([]string{"granularity", granularity})
+		_ = w.Write([]string{"criterion", criterion})
+	}
 	_ = w.Write([]string{"spans_per_annotator"})
 	for _, annotator := range annotators {
 		count := annCounts[annotator]
@@ -96,54 +107,65 @@ func metricsCSV(docs []Document, label string, annotators []string, criterion, g
 	}
 	_ = w.Write([]string{""})
 
-	// — Span Matching —
-	_ = w.Write([]string{"SPAN MATCHING"})
-	_ = w.Write([]string{"pair", "direction", "tp", "ref_count", "sys_count", "precision", "recall", "f1"})
-	pairs := spanMatchingAllPairs(docs, label, annotators, criterion)
-	pairKeys := make([]string, 0, len(pairs))
-	for k := range pairs {
-		pairKeys = append(pairKeys, k)
-	}
-	sort.Strings(pairKeys)
-	for _, pairKey := range pairKeys {
-		dirMap := pairs[pairKey]
-		dirKeys := make([]string, 0, len(dirMap))
-		for k := range dirMap {
-			dirKeys = append(dirKeys, k)
+	if !isDocumentLevel {
+		// — Span Matching —
+		_ = w.Write([]string{"SPAN MATCHING"})
+		_ = w.Write([]string{"pair", "direction", "tp", "ref_count", "sys_count", "precision", "recall", "f1"})
+		pairs := spanMatchingAllPairs(docs, label, annotators, criterion)
+		pairKeys := make([]string, 0, len(pairs))
+		for k := range pairs {
+			pairKeys = append(pairKeys, k)
 		}
-		sort.Strings(dirKeys)
-		for _, dirKey := range dirKeys {
-			r := dirMap[dirKey]
-			_ = w.Write([]string{
-				pairKey, dirKey,
-				fmt.Sprintf("%d", r.TruePositives),
-				fmt.Sprintf("%d", r.RefSpanCount),
-				fmt.Sprintf("%d", r.SysSpanCount),
-				nullFloatStr(r.Precision),
-				nullFloatStr(r.Recall),
-				nullFloatStr(r.F1),
-			})
-		}
-	}
-
-	// macro F1 (mean across all pair directions)
-	pairs2 := spanMatchingAllPairs(docs, label, annotators, criterion)
-	var f1vals []float64
-	for _, pairResult := range pairs2 {
-		for _, dir := range pairResult {
-			if dir.F1.Valid {
-				f1vals = append(f1vals, dir.F1.Value)
+		sort.Strings(pairKeys)
+		for _, pairKey := range pairKeys {
+			dirMap := pairs[pairKey]
+			dirKeys := make([]string, 0, len(dirMap))
+			for k := range dirMap {
+				dirKeys = append(dirKeys, k)
+			}
+			sort.Strings(dirKeys)
+			for _, dirKey := range dirKeys {
+				r := dirMap[dirKey]
+				_ = w.Write([]string{
+					pairKey, dirKey,
+					fmt.Sprintf("%d", r.TruePositives),
+					fmt.Sprintf("%d", r.RefSpanCount),
+					fmt.Sprintf("%d", r.SysSpanCount),
+					nullFloatStr(r.Precision),
+					nullFloatStr(r.Recall),
+					nullFloatStr(r.F1),
+				})
 			}
 		}
-	}
-	macroF1 := safeMean(f1vals)
-	_ = w.Write([]string{"macro_f1", nullFloatStr(macroF1)})
-	_ = w.Write([]string{""})
 
-	// — Coverage Agreement —
-	_ = w.Write([]string{"COVERAGE AGREEMENT"})
-	covMatrix := buildCoverageMatrix(docs, label, annotators, granularity)
-	_ = w.Write([]string{"matrix_items", fmt.Sprintf("%d", len(covMatrix[1]))})
+		// macro F1 (mean across all pair directions)
+		var f1vals []float64
+		for _, pairResult := range pairs {
+			for _, dir := range pairResult {
+				if dir.F1.Valid {
+					f1vals = append(f1vals, dir.F1.Value)
+				}
+			}
+		}
+		macroF1 := safeMean(f1vals)
+		_ = w.Write([]string{"macro_f1", nullFloatStr(macroF1)})
+		_ = w.Write([]string{""})
+	}
+
+	// — Coverage / Label Agreement —
+	var covMatrix [][]*float64
+	if isDocumentLevel {
+		_ = w.Write([]string{"LABEL AGREEMENT"})
+		covMatrix = buildPresenceMatrix(docs, label, annotators)
+	} else {
+		_ = w.Write([]string{"COVERAGE AGREEMENT"})
+		covMatrix = buildCoverageMatrix(docs, label, annotators, granularity)
+	}
+	matrixItems := 0
+	if len(covMatrix) > 0 {
+		matrixItems = len(covMatrix[0])
+	}
+	_ = w.Write([]string{"matrix_items", fmt.Sprintf("%d", matrixItems)})
 	covAlpha := krippendorffAlpha(covMatrix)
 	covKappas := cohenKappaAllPairs(covMatrix, annotators)
 
@@ -287,7 +309,7 @@ func main() {
 	fmt.Printf("Output       : %s\n\n", *output)
 
 	// Load raw data (needed for per-document loop)
-	labels, _, documents, err := loadData(*input)
+	labels, _, documents, annotationLevel, err := loadData(*input)
 	if err != nil {
 		log.Fatalf("error loading data: %v", err)
 	}
@@ -331,7 +353,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("error creating %s/metrics.csv: %v", labelDir, err)
 			}
-			if _, err := metricsEntry.Write(metricsCSV([]Document{doc}, label, docAnns, *criterion, *granularity)); err != nil {
+			if _, err := metricsEntry.Write(metricsCSV([]Document{doc}, label, docAnns, *criterion, *granularity, annotationLevel)); err != nil {
 				log.Fatalf("error writing metrics CSV: %v", err)
 			}
 
@@ -356,7 +378,7 @@ func main() {
 	fmt.Fprintln(os.Stderr) // end progress bar line
 
 	// aggregated folder: location=root computed over all documents
-	_, allAnnotators, _, _ := loadData(*input)
+	_, allAnnotators, _, _, _ := loadData(*input)
 	for _, label := range labels {
 		aggDir := fmt.Sprintf("aggregated/%s", sanitizeName(label))
 
@@ -364,7 +386,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("error creating %s/metrics.csv: %v", aggDir, err)
 		}
-		if _, err := aggMetrics.Write(metricsCSV(documents, label, allAnnotators, *criterion, *granularity)); err != nil {
+		if _, err := aggMetrics.Write(metricsCSV(documents, label, allAnnotators, *criterion, *granularity, annotationLevel)); err != nil {
 			log.Fatalf("error writing aggregated metrics CSV: %v", err)
 		}
 
@@ -391,18 +413,30 @@ func main() {
 		len(documents), len(labels))
 
 	// Summary table
+	isDocumentLevel := report.Meta.AnnotationLevel == "document"
 	s := report.Summary
 	fmt.Println("=== SUMMARY ===")
 	fmt.Printf("  Documents                          : %d\n", report.Meta.NumDocuments)
 	fmt.Printf("  Annotators                         : %s\n", strings.Join(report.Meta.Annotators, ", "))
-	fmt.Printf("  Granularity (coverage view)        : %s\n", report.Meta.Granularity)
-	fmt.Printf("  Span matching       - mean F1       : %v\n", s.SpanMatching.MeanF1AllLabels)
-	fmt.Printf("  Coverage agreement  - mean α        : %v\n", s.CoverageAgreement.MeanKrippendorffAlpha)
-	fmt.Printf("  Coverage agreement  - mean κ        : %v\n\n", s.CoverageAgreement.MeanCohenKappaAllPairs)
+	fmt.Printf("  Annotation level                    : %s\n", report.Meta.AnnotationLevel)
+	if isDocumentLevel {
+		fmt.Printf("  Label agreement     - mean α        : %v\n", s.CoverageAgreement.MeanKrippendorffAlpha)
+		fmt.Printf("  Label agreement     - mean κ        : %v\n\n", s.CoverageAgreement.MeanCohenKappaAllPairs)
+	} else {
+		fmt.Printf("  Granularity (coverage view)        : %s\n", report.Meta.Granularity)
+		fmt.Printf("  Span matching       - mean F1       : %v\n", s.SpanMatching.MeanF1AllLabels)
+		fmt.Printf("  Coverage agreement  - mean α        : %v\n", s.CoverageAgreement.MeanKrippendorffAlpha)
+		fmt.Printf("  Coverage agreement  - mean κ        : %v\n\n", s.CoverageAgreement.MeanCohenKappaAllPairs)
+	}
 
 	colW := 34
-	fmt.Printf("%-*s %8s %8s %8s\n", colW, "Label", "F1", "cov α", "cov κ")
-	fmt.Println(strings.Repeat("-", 65))
+	if isDocumentLevel {
+		fmt.Printf("%-*s %8s %8s\n", colW, "Label", "label α", "label κ")
+		fmt.Println(strings.Repeat("-", 52))
+	} else {
+		fmt.Printf("%-*s %8s %8s %8s\n", colW, "Label", "F1", "cov α", "cov κ")
+		fmt.Println(strings.Repeat("-", 65))
+	}
 
 	labelNames := make([]string, 0, len(report.PerLabel))
 	for k := range report.PerLabel {
@@ -433,6 +467,10 @@ func main() {
 		if meanKappa.Valid {
 			kappaStr = fmt.Sprintf("%.4f", meanKappa.Value)
 		}
-		fmt.Printf("%-*s%s%s%s\n", colW, label, f1Str, covStr, kappaStr)
+		if isDocumentLevel {
+			fmt.Printf("%-*s%s%s\n", colW, label, covStr, kappaStr)
+		} else {
+			fmt.Printf("%-*s%s%s%s\n", colW, label, f1Str, covStr, kappaStr)
+		}
 	}
 }
