@@ -157,10 +157,19 @@ func metricsCSV(docs []Document, label string, annotators []string, criterion, g
 	for _, k := range kappaKeys {
 		_ = w.Write([]string{k, nullFloatStr(covKappas[k])})
 	}
-	_ = w.Write([]string{""})
 
-	// — Difficulty Rating —
-	_ = w.Write([]string{"DIFFICULTY RATING"})
+	w.Flush()
+	return []byte(buf.String())
+}
+
+// confidenceCSV generates confidence.csv content: difficulty_rating stats
+// and Krippendorff's alpha across annotators for a set of documents. This is
+// independent of label, so it's written once per document (or once for the
+// aggregate) rather than duplicated inside every label's metrics.csv.
+func confidenceCSV(docs []Document, annotators []string) []byte {
+	var buf strings.Builder
+	w := csv.NewWriter(&buf)
+
 	diff := difficultyRatingSummary(docs, annotators)
 	_ = w.Write([]string{"total", fmt.Sprintf("%d", diff.Total)})
 	_ = w.Write([]string{"rated", fmt.Sprintf("%d", diff.Rated)})
@@ -323,6 +332,15 @@ func main() {
 				log.Fatalf("error writing annotations CSV: %v", err)
 			}
 		}
+
+		docDir := fmt.Sprintf("documents/%s", docName)
+		confidenceEntry, err := zw.Create(docDir + "/confidence.csv")
+		if err != nil {
+			log.Fatalf("error creating %s/confidence.csv: %v", docDir, err)
+		}
+		if _, err := confidenceEntry.Write(confidenceCSV([]Document{doc}, docAnns)); err != nil {
+			log.Fatalf("error writing confidence CSV: %v", err)
+		}
 	}
 	fmt.Fprintln(os.Stderr) // end progress bar line
 
@@ -348,9 +366,17 @@ func main() {
 		}
 	}
 
+	aggConfidence, err := zw.Create("aggregated/confidence.csv")
+	if err != nil {
+		log.Fatalf("error creating aggregated/confidence.csv: %v", err)
+	}
+	if _, err := aggConfidence.Write(confidenceCSV(documents, allAnnotators)); err != nil {
+		log.Fatalf("error writing aggregated confidence CSV: %v", err)
+	}
+
 	fmt.Printf("\nReport written to: %s\n", *output)
-	fmt.Printf("  aggregated/{label}/metrics.csv + annotations.csv\n")
-	fmt.Printf("  documents/{doc}/{label}/metrics.csv + annotations.csv  (%d documents × %d labels)\n\n",
+	fmt.Printf("  aggregated/{label}/metrics.csv + annotations.csv, aggregated/confidence.csv\n")
+	fmt.Printf("  documents/{doc}/{label}/metrics.csv + annotations.csv, documents/{doc}/confidence.csv  (%d documents × %d labels)\n\n",
 		len(documents), len(labels))
 
 	// Summary table
