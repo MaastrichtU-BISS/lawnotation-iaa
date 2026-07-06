@@ -215,9 +215,26 @@ func confidenceCSV(docs []Document, annotators []string) []byte {
 }
 
 // labelAnnotationsCSV generates annotations.csv content for one document+label.
-func labelAnnotationsCSV(doc Document, label string) []byte {
+// For annotationLevel=="document" data, start/end/text/difficulty_rating are
+// omitted: start/end/text are always trivial (0, 0, "") at that level, and
+// difficulty_rating is already reported per document/annotator in
+// confidence.csv, so repeating it per annotation row here adds nothing.
+func labelAnnotationsCSV(doc Document, label, annotationLevel string) []byte {
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
+	if annotationLevel == "document" {
+		_ = w.Write([]string{"annotator"})
+		for _, asgn := range doc.Assignments {
+			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
+			for _, ann := range asgn.Annotations {
+				if ann.Label == label {
+					_ = w.Write([]string{annotatorID})
+				}
+			}
+		}
+		w.Flush()
+		return []byte(buf.String())
+	}
 	_ = w.Write([]string{"annotator", "difficulty_rating", "start", "end", "text"})
 	for _, asgn := range doc.Assignments {
 		annotatorID := fmt.Sprintf("%v", asgn.Annotator)
@@ -238,10 +255,27 @@ func labelAnnotationsCSV(doc Document, label string) []byte {
 }
 
 // aggregatedAnnotationsCSV generates annotations.csv for a label across all documents,
-// with an additional "document" column identifying the source document.
-func aggregatedAnnotationsCSV(documents []Document, label string) []byte {
+// with an additional "document" column identifying the source document. See
+// labelAnnotationsCSV for why start/end/text/difficulty_rating are omitted
+// for annotationLevel=="document" data.
+func aggregatedAnnotationsCSV(documents []Document, label, annotationLevel string) []byte {
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
+	if annotationLevel == "document" {
+		_ = w.Write([]string{"document", "annotator"})
+		for _, doc := range documents {
+			for _, asgn := range doc.Assignments {
+				annotatorID := fmt.Sprintf("%v", asgn.Annotator)
+				for _, ann := range asgn.Annotations {
+					if ann.Label == label {
+						_ = w.Write([]string{stripExt(doc.Name), annotatorID})
+					}
+				}
+			}
+		}
+		w.Flush()
+		return []byte(buf.String())
+	}
 	_ = w.Write([]string{"document", "annotator", "difficulty_rating", "start", "end", "text"})
 	for _, doc := range documents {
 		for _, asgn := range doc.Assignments {
@@ -361,7 +395,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("error creating %s/annotations.csv: %v", labelDir, err)
 			}
-			if _, err := annotationsEntry.Write(labelAnnotationsCSV(doc, label)); err != nil {
+			if _, err := annotationsEntry.Write(labelAnnotationsCSV(doc, label, annotationLevel)); err != nil {
 				log.Fatalf("error writing annotations CSV: %v", err)
 			}
 		}
@@ -394,7 +428,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("error creating %s/annotations.csv: %v", aggDir, err)
 		}
-		if _, err := aggAnnotations.Write(aggregatedAnnotationsCSV(documents, label)); err != nil {
+		if _, err := aggAnnotations.Write(aggregatedAnnotationsCSV(documents, label, annotationLevel)); err != nil {
 			log.Fatalf("error writing aggregated annotations CSV: %v", err)
 		}
 	}
