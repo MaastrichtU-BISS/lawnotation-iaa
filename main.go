@@ -196,13 +196,14 @@ func confidenceCSV(docs []Document, annotators []string) []byte {
 func labelAnnotationsCSV(doc Document, label string) []byte {
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"annotator", "start", "end", "text"})
+	_ = w.Write([]string{"annotator", "difficulty_rating", "start", "end", "text"})
 	for _, asgn := range doc.Assignments {
 		annotatorID := fmt.Sprintf("%v", asgn.Annotator)
 		for _, ann := range asgn.Annotations {
 			if ann.Label == label {
 				_ = w.Write([]string{
 					annotatorID,
+					fmt.Sprintf("%d", asgn.DifficultyRating),
 					fmt.Sprintf("%d", ann.Start),
 					fmt.Sprintf("%d", ann.End),
 					ann.Text,
@@ -219,7 +220,7 @@ func labelAnnotationsCSV(doc Document, label string) []byte {
 func aggregatedAnnotationsCSV(documents []Document, label string) []byte {
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"document", "annotator", "start", "end", "text"})
+	_ = w.Write([]string{"document", "annotator", "difficulty_rating", "start", "end", "text"})
 	for _, doc := range documents {
 		for _, asgn := range doc.Assignments {
 			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
@@ -228,6 +229,7 @@ func aggregatedAnnotationsCSV(documents []Document, label string) []byte {
 					_ = w.Write([]string{
 						stripExt(doc.Name),
 						annotatorID,
+						fmt.Sprintf("%d", asgn.DifficultyRating),
 						fmt.Sprintf("%d", ann.Start),
 						fmt.Sprintf("%d", ann.End),
 						ann.Text,
