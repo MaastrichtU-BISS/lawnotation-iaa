@@ -419,6 +419,7 @@ func main() {
 	fmt.Printf("  Annotators                         : %s\n", strings.Join(report.Meta.Annotators, ", "))
 	fmt.Printf("  Annotation level                    : %s\n", report.Meta.AnnotationLevel)
 	if !isDocumentLevel {
+		fmt.Printf("  Criterion        : %s\n", report.Meta.Criterion)
 		fmt.Printf("  Granularity (coverage view)        : %s\n", report.Meta.Granularity)
 	}
 	fmt.Println()
