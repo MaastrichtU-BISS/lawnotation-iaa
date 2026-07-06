@@ -1,3 +1,14 @@
 {
-    "nuxt.isNuxtApp": false
+  "files.exclude": {
+    "**/input": true,
+    "**/output": true
+  },
+  "search.exclude": {
+    "**/input": true,
+    "**/output": true
+  },
+  "files.watcherExclude": {
+    "**/input/**": true,
+    "**/output/**": true
+  }
 }
