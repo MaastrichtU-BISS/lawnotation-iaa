@@ -312,16 +312,101 @@ func sanitizeName(s string) string {
 	return b.String()
 }
 
+// writeReportZip writes the full report (per-document and aggregated
+// metrics/annotations/confidence CSVs) into zw. onProgress, if non-nil, is
+// called before each document is processed (used by the CLI for a progress
+// bar; the server passes nil). Shared by both the CLI and the HTTP server so
+// the zip contents can't drift between the two entry points.
+func writeReportZip(zw *zip.Writer, documents []Document, labels, allAnnotators []string, criterion, granularity, annotationLevel string, onProgress func(current, total int, docName string)) error {
+	for i, doc := range documents {
+		if onProgress != nil {
+			onProgress(i+1, len(documents), doc.Name)
+		}
+
+		docName := sanitizeName(stripExt(doc.Name))
+		if docName == "" {
+			docName = fmt.Sprintf("document_%d", i+1)
+		}
+		docAnns := docAnnotators(doc)
+
+		for _, label := range labels {
+			labelDir := fmt.Sprintf("documents/%s/%s", docName, sanitizeName(label))
+
+			metricsEntry, err := zw.Create(labelDir + "/metrics.csv")
+			if err != nil {
+				return fmt.Errorf("creating %s/metrics.csv: %w", labelDir, err)
+			}
+			if _, err := metricsEntry.Write(metricsCSV([]Document{doc}, label, docAnns, criterion, granularity, annotationLevel)); err != nil {
+				return fmt.Errorf("writing %s/metrics.csv: %w", labelDir, err)
+			}
+
+			annotationsEntry, err := zw.Create(labelDir + "/annotations.csv")
+			if err != nil {
+				return fmt.Errorf("creating %s/annotations.csv: %w", labelDir, err)
+			}
+			if _, err := annotationsEntry.Write(labelAnnotationsCSV(doc, label, annotationLevel)); err != nil {
+				return fmt.Errorf("writing %s/annotations.csv: %w", labelDir, err)
+			}
+		}
+
+		docDir := fmt.Sprintf("documents/%s", docName)
+		confidenceEntry, err := zw.Create(docDir + "/confidence.csv")
+		if err != nil {
+			return fmt.Errorf("creating %s/confidence.csv: %w", docDir, err)
+		}
+		if _, err := confidenceEntry.Write(confidenceCSV([]Document{doc}, docAnns)); err != nil {
+			return fmt.Errorf("writing %s/confidence.csv: %w", docDir, err)
+		}
+	}
+
+	for _, label := range labels {
+		aggDir := fmt.Sprintf("aggregated/%s", sanitizeName(label))
+
+		aggMetrics, err := zw.Create(aggDir + "/metrics.csv")
+		if err != nil {
+			return fmt.Errorf("creating %s/metrics.csv: %w", aggDir, err)
+		}
+		if _, err := aggMetrics.Write(metricsCSV(documents, label, allAnnotators, criterion, granularity, annotationLevel)); err != nil {
+			return fmt.Errorf("writing %s/metrics.csv: %w", aggDir, err)
+		}
+
+		aggAnnotations, err := zw.Create(aggDir + "/annotations.csv")
+		if err != nil {
+			return fmt.Errorf("creating %s/annotations.csv: %w", aggDir, err)
+		}
+		if _, err := aggAnnotations.Write(aggregatedAnnotationsCSV(documents, label, annotationLevel)); err != nil {
+			return fmt.Errorf("writing %s/annotations.csv: %w", aggDir, err)
+		}
+	}
+
+	aggConfidence, err := zw.Create("aggregated/confidence.csv")
+	if err != nil {
+		return fmt.Errorf("creating aggregated/confidence.csv: %w", err)
+	}
+	if _, err := aggConfidence.Write(confidenceCSV(documents, allAnnotators)); err != nil {
+		return fmt.Errorf("writing aggregated/confidence.csv: %w", err)
+	}
+
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 func main() {
-	input := flag.String("input", "", "Path to LawNotation JSON export (required)")
+	input := flag.String("input", "", "Path to LawNotation JSON export (required unless --serve)")
 	criterion := flag.String("criterion", "exact", "Match criterion: exact|contained")
 	granularity := flag.String("granularity", "word", "Coverage granularity: char|word")
 	output := flag.String("output", "iaa_report.zip", "Output ZIP path")
+	serve := flag.Bool("serve", false, "Start an HTTP server (POST /metrics, POST /report.zip) instead of running as a one-off CLI batch")
+	port := flag.String("port", "8080", "Port to listen on in --serve mode")
 	flag.Parse()
+
+	if *serve {
+		runServer(*port)
+		return
+	}
 
 	if *input == "" {
 		fmt.Fprintln(os.Stderr, "error: --input is required")
@@ -343,7 +428,7 @@ func main() {
 	fmt.Printf("Output       : %s\n\n", *output)
 
 	// Load raw data (needed for per-document loop)
-	labels, _, documents, annotationLevel, err := loadData(*input)
+	labels, allAnnotators, documents, annotationLevel, err := loadData(*input)
 	if err != nil {
 		log.Fatalf("error loading data: %v", err)
 	}
@@ -369,77 +454,11 @@ func main() {
 	zw := zip.NewWriter(zipFile)
 	defer zw.Close()
 
-	// Per-document CSVs
 	fmt.Printf("Processing %d documents...\n", len(documents))
-	for i, doc := range documents {
-		printProgress(i+1, len(documents), doc.Name)
-
-		docName := sanitizeName(stripExt(doc.Name))
-		if docName == "" {
-			docName = fmt.Sprintf("document_%d", i+1)
-		}
-		docAnns := docAnnotators(doc)
-
-		for _, label := range labels {
-			labelDir := fmt.Sprintf("documents/%s/%s", docName, sanitizeName(label))
-
-			metricsEntry, err := zw.Create(labelDir + "/metrics.csv")
-			if err != nil {
-				log.Fatalf("error creating %s/metrics.csv: %v", labelDir, err)
-			}
-			if _, err := metricsEntry.Write(metricsCSV([]Document{doc}, label, docAnns, *criterion, *granularity, annotationLevel)); err != nil {
-				log.Fatalf("error writing metrics CSV: %v", err)
-			}
-
-			annotationsEntry, err := zw.Create(labelDir + "/annotations.csv")
-			if err != nil {
-				log.Fatalf("error creating %s/annotations.csv: %v", labelDir, err)
-			}
-			if _, err := annotationsEntry.Write(labelAnnotationsCSV(doc, label, annotationLevel)); err != nil {
-				log.Fatalf("error writing annotations CSV: %v", err)
-			}
-		}
-
-		docDir := fmt.Sprintf("documents/%s", docName)
-		confidenceEntry, err := zw.Create(docDir + "/confidence.csv")
-		if err != nil {
-			log.Fatalf("error creating %s/confidence.csv: %v", docDir, err)
-		}
-		if _, err := confidenceEntry.Write(confidenceCSV([]Document{doc}, docAnns)); err != nil {
-			log.Fatalf("error writing confidence CSV: %v", err)
-		}
+	if err := writeReportZip(zw, documents, labels, allAnnotators, *criterion, *granularity, annotationLevel, printProgress); err != nil {
+		log.Fatalf("error writing report: %v", err)
 	}
 	fmt.Fprintln(os.Stderr) // end progress bar line
-
-	// aggregated folder: location=root computed over all documents
-	_, allAnnotators, _, _, _ := loadData(*input)
-	for _, label := range labels {
-		aggDir := fmt.Sprintf("aggregated/%s", sanitizeName(label))
-
-		aggMetrics, err := zw.Create(aggDir + "/metrics.csv")
-		if err != nil {
-			log.Fatalf("error creating %s/metrics.csv: %v", aggDir, err)
-		}
-		if _, err := aggMetrics.Write(metricsCSV(documents, label, allAnnotators, *criterion, *granularity, annotationLevel)); err != nil {
-			log.Fatalf("error writing aggregated metrics CSV: %v", err)
-		}
-
-		aggAnnotations, err := zw.Create(aggDir + "/annotations.csv")
-		if err != nil {
-			log.Fatalf("error creating %s/annotations.csv: %v", aggDir, err)
-		}
-		if _, err := aggAnnotations.Write(aggregatedAnnotationsCSV(documents, label, annotationLevel)); err != nil {
-			log.Fatalf("error writing aggregated annotations CSV: %v", err)
-		}
-	}
-
-	aggConfidence, err := zw.Create("aggregated/confidence.csv")
-	if err != nil {
-		log.Fatalf("error creating aggregated/confidence.csv: %v", err)
-	}
-	if _, err := aggConfidence.Write(confidenceCSV(documents, allAnnotators)); err != nil {
-		log.Fatalf("error writing aggregated confidence CSV: %v", err)
-	}
 
 	fmt.Printf("\nReport written to: %s\n", *output)
 	fmt.Printf("  aggregated/{label}/metrics.csv + annotations.csv, aggregated/confidence.csv\n")

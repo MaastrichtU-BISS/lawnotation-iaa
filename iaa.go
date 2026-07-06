@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"regexp"
@@ -392,12 +393,12 @@ func buildDifficultyMatrix(documents []Document, annotators []string) [][]*float
 }
 
 type DifficultyRatingSummary struct {
-	Total      int
-	Rated      int
-	Mean       NullFloat64
-	Counts     map[int]int // keys 1..5
-	Alpha      NullFloat64
-	AlphaPairs map[string]NullFloat64
+	Total      int                    `json:"total"`
+	Rated      int                    `json:"rated"`
+	Mean       NullFloat64            `json:"mean"`
+	Counts     map[int]int            `json:"counts"` // keys 1..5
+	Alpha      NullFloat64            `json:"krippendorff_alpha"`
+	AlphaPairs map[string]NullFloat64 `json:"krippendorff_alpha_pairs"`
 }
 
 // difficultyRatingSummary computes total/rated counts, the star histogram,
@@ -567,14 +568,21 @@ func spanCounts(documents []Document, label string, annotators []string) map[str
 	return counts
 }
 
+// loadData reads a LawNotation JSON export from disk (CLI path).
 func loadData(path string) ([]string, []string, []Document, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
 	defer f.Close()
+	return loadDataFromReader(f)
+}
+
+// loadDataFromReader reads a LawNotation JSON export from any reader (e.g. an
+// HTTP request body), sharing the same extraction logic as loadData.
+func loadDataFromReader(r io.Reader) ([]string, []string, []Document, string, error) {
 	var raw InputData
-	if err := json.NewDecoder(f).Decode(&raw); err != nil {
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
 		return nil, nil, nil, "", err
 	}
 	labels := make([]string, len(raw.Labelset.Labels))
@@ -614,11 +622,20 @@ func safeMean(vals []float64) NullFloat64 {
 	return roundFloat(s / float64(len(vals)))
 }
 
+// computeIAA loads a LawNotation JSON export from disk and computes the
+// full IAA report (CLI path).
 func computeIAA(inputPath, criterion, granularity string) (Report, error) {
 	labels, annotators, documents, annotationLevel, err := loadData(inputPath)
 	if err != nil {
 		return Report{}, err
 	}
+	return computeIAAFromData(inputPath, labels, annotators, documents, annotationLevel, criterion, granularity), nil
+}
+
+// computeIAAFromData computes the full IAA report from already-loaded data,
+// so callers that already have the data in memory (e.g. an HTTP handler
+// reading a request body) don't need to round-trip through a file path.
+func computeIAAFromData(inputLabel string, labels, annotators []string, documents []Document, annotationLevel, criterion, granularity string) Report {
 	isDocumentLevel := annotationLevel == "document"
 	prefixedAnnotators := make([]string, len(annotators))
 	for i, a := range annotators {
@@ -642,7 +659,7 @@ func computeIAA(inputPath, criterion, granularity string) (Report, error) {
 	}
 	report := Report{
 		Meta: Meta{
-			InputFile:       inputPath,
+			InputFile:       inputLabel,
 			AnnotationLevel: annotationLevel,
 			Criterion:       criterion,
 			Granularity:     granularity,
@@ -694,5 +711,5 @@ func computeIAA(inputPath, criterion, granularity string) (Report, error) {
 			},
 		}
 	}
-	return report, nil
+	return report
 }
