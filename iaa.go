@@ -152,11 +152,13 @@ func krippendorffAlpha(matrix [][]*float64) NullFloat64 {
 				colVals = append(colVals, *matrix[r][col])
 			}
 		}
-		allVals = append(allVals, colVals...)
 		mU := len(colVals)
 		if mU < 2 {
+			// Unpairable unit (fewer than 2 raters): excluded entirely,
+			// including from the expected-agreement baseline below.
 			continue
 		}
+		allVals = append(allVals, colVals...)
 		for i := 0; i < mU; i++ {
 			for j := i + 1; j < mU; j++ {
 				if colVals[i] != colVals[j] {
