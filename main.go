@@ -178,6 +178,15 @@ func confidenceCSV(docs []Document, annotators []string) []byte {
 		_ = w.Write([]string{fmt.Sprintf("star_%d", star), fmt.Sprintf("%d", diff.Counts[star])})
 	}
 	_ = w.Write([]string{"krippendorff_alpha", nullFloatStr(diff.Alpha)})
+	_ = w.Write([]string{"krippendorff_alpha_pairs"})
+	pairKeys := make([]string, 0, len(diff.AlphaPairs))
+	for k := range diff.AlphaPairs {
+		pairKeys = append(pairKeys, k)
+	}
+	sort.Strings(pairKeys)
+	for _, k := range pairKeys {
+		_ = w.Write([]string{k, nullFloatStr(diff.AlphaPairs[k])})
+	}
 
 	w.Flush()
 	return []byte(buf.String())

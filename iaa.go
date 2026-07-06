@@ -212,6 +212,19 @@ func krippendorffAlpha(matrix [][]*float64) NullFloat64 {
 	return nullFloat(1.0 - Do/De)
 }
 
+// krippendorffAlphaAllPairs computes Krippendorff's alpha restricted to each
+// pair of annotators in turn (mirroring cohenKappaAllPairs).
+func krippendorffAlphaAllPairs(matrix [][]*float64, annotators []string) map[string]NullFloat64 {
+	result := map[string]NullFloat64{}
+	for i := 0; i < len(annotators); i++ {
+		for j := i + 1; j < len(annotators); j++ {
+			key := fmt.Sprintf("annotator_%s_vs_annotator_%s", annotators[i], annotators[j])
+			result[key] = krippendorffAlpha([][]*float64{matrix[i], matrix[j]})
+		}
+	}
+	return result
+}
+
 // ---------------------------------------------------------------------------
 // Cohen's kappa
 // ---------------------------------------------------------------------------
@@ -358,16 +371,18 @@ func buildDifficultyMatrix(documents []Document, annotators []string) [][]*float
 }
 
 type DifficultyRatingSummary struct {
-	Total  int
-	Rated  int
-	Mean   NullFloat64
-	Counts map[int]int // keys 1..5
-	Alpha  NullFloat64
+	Total      int
+	Rated      int
+	Mean       NullFloat64
+	Counts     map[int]int // keys 1..5
+	Alpha      NullFloat64
+	AlphaPairs map[string]NullFloat64
 }
 
 // difficultyRatingSummary computes total/rated counts, the star histogram,
-// mean rating (over rated assignments only), and Krippendorff's alpha across
-// annotators for the difficulty_rating field over the given documents.
+// mean rating (over rated assignments only), and Krippendorff's alpha (both
+// overall and per annotator pair) for the difficulty_rating field over the
+// given documents.
 func difficultyRatingSummary(documents []Document, annotators []string) DifficultyRatingSummary {
 	total := 0
 	counts := map[int]int{1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
@@ -382,12 +397,14 @@ func difficultyRatingSummary(documents []Document, annotators []string) Difficul
 			}
 		}
 	}
+	matrix := buildDifficultyMatrix(documents, annotators)
 	return DifficultyRatingSummary{
-		Total:  total,
-		Rated:  len(ratedVals),
-		Mean:   safeMean(ratedVals),
-		Counts: counts,
-		Alpha:  krippendorffAlpha(buildDifficultyMatrix(documents, annotators)),
+		Total:      total,
+		Rated:      len(ratedVals),
+		Mean:       safeMean(ratedVals),
+		Counts:     counts,
+		Alpha:      krippendorffAlpha(matrix),
+		AlphaPairs: krippendorffAlphaAllPairs(matrix, annotators),
 	}
 }
 
