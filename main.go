@@ -100,7 +100,7 @@ func metricsCSV(docs []Document, label string, annotators []string, criterion, g
 		_ = w.Write([]string{"granularity", granularity})
 		_ = w.Write([]string{"criterion", criterion})
 	}
-	_ = w.Write([]string{"spans_per_annotator"})
+	_ = w.Write([]string{"annotations_per_annotator"})
 	for _, annotator := range annotators {
 		count := annCounts[annotator]
 		_ = w.Write([]string{"annotator_" + annotator, fmt.Sprintf("%d", count)})
