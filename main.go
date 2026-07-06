@@ -414,20 +414,14 @@ func main() {
 
 	// Summary table
 	isDocumentLevel := report.Meta.AnnotationLevel == "document"
-	s := report.Summary
 	fmt.Println("=== SUMMARY ===")
 	fmt.Printf("  Documents                          : %d\n", report.Meta.NumDocuments)
 	fmt.Printf("  Annotators                         : %s\n", strings.Join(report.Meta.Annotators, ", "))
 	fmt.Printf("  Annotation level                    : %s\n", report.Meta.AnnotationLevel)
-	if isDocumentLevel {
-		fmt.Printf("  Label agreement     - mean α        : %v\n", s.CoverageAgreement.MeanKrippendorffAlpha)
-		fmt.Printf("  Label agreement     - mean κ        : %v\n\n", s.CoverageAgreement.MeanCohenKappaAllPairs)
-	} else {
+	if !isDocumentLevel {
 		fmt.Printf("  Granularity (coverage view)        : %s\n", report.Meta.Granularity)
-		fmt.Printf("  Span matching       - mean F1       : %v\n", s.SpanMatching.MeanF1AllLabels)
-		fmt.Printf("  Coverage agreement  - mean α        : %v\n", s.CoverageAgreement.MeanKrippendorffAlpha)
-		fmt.Printf("  Coverage agreement  - mean κ        : %v\n\n", s.CoverageAgreement.MeanCohenKappaAllPairs)
 	}
+	fmt.Println()
 
 	colW := 34
 	if isDocumentLevel {

@@ -102,21 +102,6 @@ type LabelResult struct {
 	CoverageAgreement      CoverageAgreement   `json:"coverage_agreement"`
 }
 
-type SummarySpanMatching struct {
-	MeanF1AllLabels NullFloat64 `json:"mean_f1_all_labels"`
-}
-
-type SummaryCoverage struct {
-	MeanKrippendorffAlpha  NullFloat64 `json:"mean_krippendorff_alpha"`
-	MeanCohenKappaAllPairs NullFloat64 `json:"mean_cohen_kappa_all_pairs"`
-}
-
-type Summary struct {
-	SpanMatching        SummarySpanMatching `json:"span_matching"`
-	CoverageAgreement   SummaryCoverage     `json:"coverage_agreement"`
-	InterpretationGuide map[string]string   `json:"interpretation_guide_alpha_kappa"`
-}
-
 type Meta struct {
 	InputFile       string            `json:"input_file"`
 	AnnotationLevel string            `json:"annotation_level"`
@@ -130,7 +115,6 @@ type Meta struct {
 type Report struct {
 	Meta     Meta                   `json:"meta"`
 	PerLabel map[string]LabelResult `json:"per_label"`
-	Summary  Summary                `json:"summary"`
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +652,6 @@ func computeIAA(inputPath, criterion, granularity string) (Report, error) {
 		},
 		PerLabel: map[string]LabelResult{},
 	}
-	var covAlphaVals, covKappaVals, f1Vals []float64
 	for _, label := range labels {
 		counts := spanCounts(documents, label, annotators)
 
@@ -710,28 +693,6 @@ func computeIAA(inputPath, criterion, granularity string) (Report, error) {
 				CohenKappaPairs:   covKappas,
 			},
 		}
-		if macroF1.Valid {
-			f1Vals = append(f1Vals, macroF1.Value)
-		}
-		if covAlpha.Valid {
-			covAlphaVals = append(covAlphaVals, covAlpha.Value)
-		}
-		for _, v := range covKappas {
-			if v.Valid {
-				covKappaVals = append(covKappaVals, v.Value)
-			}
-		}
-	}
-	report.Summary = Summary{
-		SpanMatching:      SummarySpanMatching{MeanF1AllLabels: safeMean(f1Vals)},
-		CoverageAgreement: SummaryCoverage{MeanKrippendorffAlpha: safeMean(covAlphaVals), MeanCohenKappaAllPairs: safeMean(covKappaVals)},
-		InterpretationGuide: map[string]string{
-			"< 0.20":    "Slight agreement",
-			"0.21-0.40": "Fair agreement",
-			"0.41-0.60": "Moderate agreement",
-			"0.61-0.80": "Substantial agreement",
-			"> 0.80":    "Almost perfect agreement",
-		},
 	}
 	return report, nil
 }
