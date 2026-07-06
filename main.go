@@ -417,20 +417,20 @@ func main() {
 	fmt.Println("=== SUMMARY ===")
 	fmt.Printf("  Documents                          : %d\n", report.Meta.NumDocuments)
 	fmt.Printf("  Annotators                         : %s\n", strings.Join(report.Meta.Annotators, ", "))
-	fmt.Printf("  Annotation level                    : %s\n", report.Meta.AnnotationLevel)
+	fmt.Printf("  Annotation level                   : %s\n", report.Meta.AnnotationLevel)
 	if !isDocumentLevel {
-		fmt.Printf("  Criterion        : %s\n", report.Meta.Criterion)
+		fmt.Printf("  Criterion                      : %s\n", report.Meta.Criterion)
 		fmt.Printf("  Granularity (coverage view)        : %s\n", report.Meta.Granularity)
 	}
 	fmt.Println()
 
 	colW := 34
 	if isDocumentLevel {
-		fmt.Printf("%-*s %8s %8s\n", colW, "Label", "label α", "label κ")
-		fmt.Println(strings.Repeat("-", 52))
+		fmt.Printf("%-*s %8s\n", colW, "Label", "label α")
+		fmt.Println(strings.Repeat("-", 43))
 	} else {
-		fmt.Printf("%-*s %8s %8s %8s\n", colW, "Label", "F1", "cov α", "cov κ")
-		fmt.Println(strings.Repeat("-", 65))
+		fmt.Printf("%-*s %8s %8s\n", colW, "Label", "F1", "cov α")
+		fmt.Println(strings.Repeat("-", 56))
 	}
 
 	labelNames := make([]string, 0, len(report.PerLabel))
@@ -443,29 +443,18 @@ func main() {
 		v := report.PerLabel[label]
 		f1Val := v.SpanMatching.MacroF1
 		covA := v.CoverageAgreement.KrippendorffAlpha
-		kappas := v.CoverageAgreement.CohenKappaPairs
-		var kVals []float64
-		for _, kv := range kappas {
-			if kv.Valid {
-				kVals = append(kVals, kv.Value)
-			}
-		}
-		meanKappa := safeMean(kVals)
 
-		f1Str, covStr, kappaStr := "     N/A", "     N/A", "     N/A"
+		f1Str, covStr := "     N/A", "     N/A"
 		if f1Val.Valid {
 			f1Str = fmt.Sprintf("%.4f", f1Val.Value)
 		}
 		if covA.Valid {
 			covStr = fmt.Sprintf("%.4f", covA.Value)
 		}
-		if meanKappa.Valid {
-			kappaStr = fmt.Sprintf("%.4f", meanKappa.Value)
-		}
 		if isDocumentLevel {
-			fmt.Printf("%-*s%s%s\n", colW, label, covStr, kappaStr)
+			fmt.Printf("%-*s%s\n", colW, label, covStr)
 		} else {
-			fmt.Printf("%-*s%s%s%s\n", colW, label, f1Str, covStr, kappaStr)
+			fmt.Printf("%-*s%s%s\n", colW, label, f1Str, covStr)
 		}
 	}
 }
