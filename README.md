@@ -123,6 +123,45 @@ go build -o iaa main.go iaa.go
 ./iaa --input input/data.json --criterion contained --output output/report.zip
 ```
 
+### Running as a server
+
+Instead of the one-off CLI batch above, `--serve` starts an HTTP server that
+computes metrics on demand for a web client:
+
+```bash
+go run main.go iaa.go --serve --port 8080
+```
+
+or with the standalone binary:
+
+```bash
+go build -o iaa main.go iaa.go
+./iaa --serve --port 8080
+```
+
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| `--serve` | flag | `false` | Start the HTTP server instead of running the CLI batch |
+| `--port` | port number | `8080` | Port to listen on in `--serve` mode |
+
+Endpoints (request body is the LawNotation JSON export, same schema as `--input`):
+
+| Endpoint | Query params | Response |
+|----------|--------------|----------|
+| `POST /metrics` | `criterion`, `granularity` (same values/defaults as above) | JSON: `{ "annotation_metrics": <report>, "confidence_metrics": <difficulty rating summary> }` |
+| `POST /report.zip` | `criterion`, `granularity` | The same ZIP report the CLI produces |
+
+```bash
+curl -X POST "http://localhost:8080/metrics?criterion=contained&granularity=word" \
+  --data-binary @input/data.json
+
+curl -X POST "http://localhost:8080/report.zip?criterion=contained&granularity=word" \
+  --data-binary @input/data.json -o report.zip
+```
+
+> There is no auth or CORS handling — this mode is intended for local
+> testing or being placed behind a trusted proxy, not public exposure.
+
 ---
 
 ## Output
