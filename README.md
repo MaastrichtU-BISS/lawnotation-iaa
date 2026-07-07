@@ -96,7 +96,7 @@ The tool reads a JSON file exported from LawNotation. The expected top-level str
 ## Usage
 
 ```bash
-go run main.go iaa.go --input <path/to/data.json> [options]
+go run main.go iaa.go server.go --input <path/to/data.json> [options]
 ```
 
 | Option | Values | Default | Description |
@@ -110,16 +110,16 @@ go run main.go iaa.go --input <path/to/data.json> [options]
 
 ```bash
 # Word-level coverage, lenient (containment) matching
-go run main.go iaa.go --input input/data.json --criterion contained --granularity word --output output/report.zip
+go run main.go iaa.go server.go --input input/data.json --criterion contained --granularity word --output output/report.zip
 
 # Character-level coverage (slower, finer-grained)
-go run main.go iaa.go --input input/data.json --granularity char --output output/report-char.zip
+go run main.go iaa.go server.go --input input/data.json --granularity char --output output/report-char.zip
 ```
 
 To build a standalone binary instead of using `go run`:
 
 ```bash
-go build -o iaa main.go iaa.go
+go build -o iaa main.go iaa.go server.go
 ./iaa --input input/data.json --criterion contained --output output/report.zip
 ```
 
@@ -129,13 +129,13 @@ Instead of the one-off CLI batch above, `--serve` starts an HTTP server that
 computes metrics on demand for a web client:
 
 ```bash
-go run main.go iaa.go --serve --port 8080
+go run main.go iaa.go server.go --serve --port 8080
 ```
 
 or with the standalone binary:
 
 ```bash
-go build -o iaa main.go iaa.go
+go build -o iaa main.go iaa.go server.go
 ./iaa --serve --port 8080
 ```
 
