@@ -172,7 +172,7 @@ The tool prints a summary table to stdout and writes a structured JSON report.
 ```
 === SUMMARY ===
   Documents                          : 42
-  Annotators                         : annotator_1, annotator_2, annotator_3
+  Annotators                         : 1, 2, 3
   Granularity (coverage view)        : word
   Span matching       - mean F1       : 0.8103
   Coverage agreement  - mean α        : 0.7821

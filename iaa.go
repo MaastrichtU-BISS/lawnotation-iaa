@@ -205,7 +205,7 @@ func krippendorffAlphaAllPairs(matrix [][]*float64, annotators []string) map[str
 	result := map[string]NullFloat64{}
 	for i := 0; i < len(annotators); i++ {
 		for j := i + 1; j < len(annotators); j++ {
-			key := fmt.Sprintf("annotator_%s_vs_annotator_%s", annotators[i], annotators[j])
+			key := fmt.Sprintf("%s_vs_%s", annotators[i], annotators[j])
 			result[key] = krippendorffAlpha([][]*float64{matrix[i], matrix[j]})
 		}
 	}
@@ -254,7 +254,7 @@ func cohenKappaAllPairs(matrix [][]*float64, annotators []string) map[string]Nul
 	result := map[string]NullFloat64{}
 	for i := 0; i < len(annotators); i++ {
 		for j := i + 1; j < len(annotators); j++ {
-			key := fmt.Sprintf("annotator_%s_vs_annotator_%s", annotators[i], annotators[j])
+			key := fmt.Sprintf("%s_vs_%s", annotators[i], annotators[j])
 			result[key] = cohenKappaPair(matrix[i], matrix[j])
 		}
 	}
@@ -534,10 +534,10 @@ func spanMatchingAllPairs(documents []Document, label string, annotators []strin
 	for i := 0; i < len(annotators); i++ {
 		for j := i + 1; j < len(annotators); j++ {
 			a, b := annotators[i], annotators[j]
-			key := fmt.Sprintf("annotator_%s_vs_annotator_%s", a, b)
+			key := fmt.Sprintf("%s_vs_%s", a, b)
 			results[key] = map[string]PairResult{
-				fmt.Sprintf("annotator_%s_as_reference", a): precisionRecallF1(documents, label, a, b, criterion),
-				fmt.Sprintf("annotator_%s_as_reference", b): precisionRecallF1(documents, label, b, a, criterion),
+				fmt.Sprintf("%s_as_reference", a): precisionRecallF1(documents, label, a, b, criterion),
+				fmt.Sprintf("%s_as_reference", b): precisionRecallF1(documents, label, b, a, criterion),
 			}
 		}
 	}
@@ -551,11 +551,11 @@ func spanMatchingAllPairs(documents []Document, label string, annotators []strin
 func spanCounts(documents []Document, label string, annotators []string) map[string]int {
 	counts := map[string]int{}
 	for _, a := range annotators {
-		counts[fmt.Sprintf("annotator_%s", a)] = 0
+		counts[a] = 0
 	}
 	for _, doc := range documents {
 		for _, asgn := range doc.Assignments {
-			key := fmt.Sprintf("annotator_%v", asgn.Annotator)
+			key := fmt.Sprintf("%v", asgn.Annotator)
 			if _, ok := counts[key]; ok {
 				for _, ann := range asgn.Annotations {
 					if ann.Label == label {
@@ -637,10 +637,6 @@ func computeIAA(inputPath, criterion, granularity string) (Report, error) {
 // reading a request body) don't need to round-trip through a file path.
 func computeIAAFromData(inputLabel string, labels, annotators []string, documents []Document, annotationLevel, criterion, granularity string) Report {
 	isDocumentLevel := annotationLevel == "document"
-	prefixedAnnotators := make([]string, len(annotators))
-	for i, a := range annotators {
-		prefixedAnnotators[i] = "annotator_" + a
-	}
 	notes := map[string]string{
 		"coverage_agreement": fmt.Sprintf(
 			"Krippendorff's alpha / Cohen's kappa on a "+
@@ -663,7 +659,7 @@ func computeIAAFromData(inputLabel string, labels, annotators []string, document
 			AnnotationLevel: annotationLevel,
 			Criterion:       criterion,
 			Granularity:     granularity,
-			Annotators:      prefixedAnnotators,
+			Annotators:      annotators,
 			NumDocuments:    len(documents),
 			Notes:           notes,
 		},
