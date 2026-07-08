@@ -1,3 +1,4 @@
 input
 output
 .claude/settings.local.json
+.env

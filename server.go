@@ -5,10 +5,12 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 )
 
 // metricsResponse is the JSON body returned by POST /metrics.
@@ -41,6 +43,24 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// requireAPIKey wraps a handler with a check that the request carries
+// "Authorization: Bearer <apiKey>". If apiKey is empty, auth is skipped
+// entirely (used for local/dev runs where IAA_API_KEY isn't set).
+func requireAPIKey(next http.HandlerFunc, apiKey string) http.HandlerFunc {
+	if apiKey == "" {
+		return next
+	}
+	expected := "Bearer " + apiKey
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // handleMetrics handles POST /metrics?criterion=exact&granularity=word.
@@ -106,14 +126,21 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 // local testing only; both are expected to be added before any real
 // deployment.
 func runServer(port string) {
+	apiKey := os.Getenv("IAA_API_KEY")
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", handleMetrics)
-	mux.HandleFunc("/report.zip", handleReportZip)
+	mux.HandleFunc("/metrics", requireAPIKey(handleMetrics, apiKey))
+	mux.HandleFunc("/report.zip", requireAPIKey(handleReportZip, apiKey))
 
 	addr := ":" + port
 	log.Printf("IAA server listening on %s", addr)
 	log.Printf("  POST /metrics?criterion=exact&granularity=word     (body: LawNotation task JSON)")
 	log.Printf("  POST /report.zip?criterion=exact&granularity=word  (body: LawNotation task JSON)")
+	if apiKey == "" {
+		log.Printf("WARNING: IAA_API_KEY not set — endpoints are unauthenticated")
+	} else {
+		log.Printf("API key auth enabled (requests must send Authorization: Bearer <key>)")
+	}
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

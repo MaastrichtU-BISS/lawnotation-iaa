@@ -19,6 +19,32 @@ import (
 // Progress bar
 // ---------------------------------------------------------------------------
 
+// loadDotEnv reads KEY=VALUE pairs from a .env file in the working
+// directory, if one exists, and applies them via os.Setenv for any key not
+// already present in the environment. Real environment variables always
+// win over .env file contents. Silently does nothing if no .env is found.
+func loadDotEnv() {
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if _, exists := os.LookupEnv(key); !exists {
+			os.Setenv(key, value)
+		}
+	}
+}
+
 func printProgress(current, total int, docName string) {
 	const width = 30
 	pct := float64(current) / float64(total)
@@ -395,6 +421,8 @@ func writeReportZip(zw *zip.Writer, documents []Document, labels, allAnnotators 
 // ---------------------------------------------------------------------------
 
 func main() {
+	loadDotEnv()
+
 	input := flag.String("input", "", "Path to LawNotation JSON export (required unless --serve)")
 	criterion := flag.String("criterion", "exact", "Match criterion: exact|contained")
 	granularity := flag.String("granularity", "word", "Coverage granularity: char|word")

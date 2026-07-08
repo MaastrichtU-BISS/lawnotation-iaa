@@ -159,8 +159,22 @@ curl -X POST "http://localhost:8080/report.zip?criterion=contained&granularity=w
   --data-binary @input/data.json -o report.zip
 ```
 
-> There is no auth or CORS handling — this mode is intended for local
-> testing or being placed behind a trusted proxy, not public exposure.
+#### Authentication
+
+If the `IAA_API_KEY` environment variable is set, both endpoints require an
+`Authorization: Bearer <key>` header; requests without it get `401
+Unauthorized`. If `IAA_API_KEY` is unset, the server runs with no auth at all
+(useful for local testing).
+
+```bash
+curl -X POST "http://localhost:8080/metrics" \
+  -H "Authorization: Bearer $IAA_API_KEY" \
+  --data-binary @input/data.json
+```
+
+There is still no CORS handling — this server is meant to be called
+server-to-server (e.g. from another backend's server-side code), not
+directly from browser JS.
 
 ---
 
