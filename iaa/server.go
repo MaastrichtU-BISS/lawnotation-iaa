@@ -1,7 +1,7 @@
 // server.go — minimal HTTP backend exposing the IAA tool's functionality to
 // a web client. No auth/CORS handling yet; both are expected to be layered
 // on later.
-package main
+package iaa
 
 import (
 	"archive/zip"

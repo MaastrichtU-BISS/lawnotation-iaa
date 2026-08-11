@@ -1,4 +1,4 @@
-package main
+package iaa
 
 // iaa.go — IAA computation logic (types, metrics, data loading).
 // The CLI entry point and output formatting live in iaa.go.
