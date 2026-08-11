@@ -176,6 +176,21 @@ There is still no CORS handling — this server is meant to be called
 server-to-server (e.g. from another backend's server-side code), not
 directly from browser JS.
 
+### Embedding in another Go program
+
+The same routes are available as a mountable `http.Handler`, so a host
+application can serve them in-process rather than running this as a separate
+service. Requests are then same-origin, which sidesteps the CORS gap above.
+
+```go
+import "github.com/MaastrichtU-BISS/lawnotation-iaa/iaa"
+
+mux.Handle("/api/services/lawnotation-iaa/", http.StripPrefix(
+    "/api/services/lawnotation-iaa", iaa.Handler()))
+```
+
+The mounted paths are `metrics` and `report.zip`, relative to the mount point.
+
 ---
 
 ## Output

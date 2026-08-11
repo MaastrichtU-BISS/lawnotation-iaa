@@ -47,20 +47,22 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 
 // requireAPIKey wraps a handler with a check that the request carries
 // "Authorization: Bearer <apiKey>". If apiKey is empty, auth is skipped
-// entirely (used for local/dev runs where IAA_API_KEY isn't set).
-func requireAPIKey(next http.HandlerFunc, apiKey string) http.HandlerFunc {
+// entirely (used for local/dev runs where IAA_API_KEY isn't set). It guards
+// the whole route set rather than each route, so a route added later cannot
+// be left unprotected by forgetting to wrap it.
+func requireAPIKey(next http.Handler, apiKey string) http.Handler {
 	if apiKey == "" {
 		return next
 	}
 	expected := "Bearer " + apiKey
-	return func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("Authorization")
 		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next(w, r)
-	}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // handleMetrics handles POST /metrics?criterion=exact&granularity=word.
@@ -122,15 +124,29 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runServer starts the HTTP server. No auth or CORS handling — this is for
-// local testing only; both are expected to be added before any real
-// deployment.
+// Handler returns the tool's HTTP routes as a mountable handler, so a host
+// application can serve them in-process instead of running this as a separate
+// service. Paths are relative to wherever it is mounted:
+//
+//	POST metrics?criterion=exact&granularity=word
+//	POST report.zip?criterion=exact&granularity=word
+//
+// Deliberately unauthenticated. The API key exists to protect a service
+// exposed over a network; a host that has compiled this in is already inside
+// the trust boundary, reaches it same-origin, and has no key to present.
+// runServer is what adds auth, because that is the deployment that needs it.
+func Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", handleMetrics)
+	mux.HandleFunc("/report.zip", handleReportZip)
+	return mux
+}
+
+// runServer starts the standalone HTTP server, requiring an API key when
+// IAA_API_KEY is set. No CORS handling — this mode is for local testing or
+// being placed behind a trusted proxy.
 func runServer(port string) {
 	apiKey := os.Getenv("IAA_API_KEY")
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", requireAPIKey(handleMetrics, apiKey))
-	mux.HandleFunc("/report.zip", requireAPIKey(handleReportZip, apiKey))
 
 	addr := ":" + port
 	log.Printf("IAA server listening on %s", addr)
@@ -141,7 +157,7 @@ func runServer(port string) {
 	} else {
 		log.Printf("API key auth enabled (requests must send Authorization: Bearer <key>)")
 	}
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, requireAPIKey(Handler(), apiKey)); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
