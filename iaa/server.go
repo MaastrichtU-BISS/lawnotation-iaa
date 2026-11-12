@@ -78,14 +78,14 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	labels, annotators, documents, annotationLevel, err := loadDataFromReader(r.Body)
+	ds, err := loadDataFromReader(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid input JSON: %v", err))
 		return
 	}
 
-	report := computeIAAFromData("", labels, annotators, documents, annotationLevel, criterion, granularity)
-	confidence := difficultyRatingSummary(documents, annotators)
+	report := computeIAAFromData("", ds, criterion, granularity)
+	confidence := difficultyRatingSummary(ds.Documents, ds.Annotators)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(metricsResponse{
@@ -106,7 +106,7 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	labels, annotators, documents, annotationLevel, err := loadDataFromReader(r.Body)
+	ds, err := loadDataFromReader(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid input JSON: %v", err))
 		return
@@ -115,7 +115,7 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="iaa_report.zip"`)
 	zw := zip.NewWriter(w)
-	if err := writeReportZip(zw, documents, labels, annotators, criterion, granularity, annotationLevel, nil); err != nil {
+	if err := writeReportZip(zw, ds, criterion, granularity, nil); err != nil {
 		log.Printf("error writing report zip: %v", err)
 		return
 	}

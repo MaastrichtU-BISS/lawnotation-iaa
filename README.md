@@ -250,3 +250,14 @@ report.zip
 None. Standard library only (`archive/zip`, `encoding/csv`, `encoding/json`, `flag`, `math`, `os`, `regexp`, `sort`, `strings`). Requires Go 1.18+.
 
 ---
+
+---
+
+## Hybrid tasks (span + document labels)
+
+With `"annotation_level": "hybrid"` a task has two labelsets: `labelset` holds the span labels and `document_labelset` the whole-document labels. Each assignment carries both `annotations` (spans, as above) and `document_annotations` (`[{ "label": "..." }]`).
+
+- Span labels are reported exactly as in a span-level task (`per_label`).
+- Document labels are reported as presence agreement (Krippendorff's α, Cohen's κ) under `per_document_label`; there is no span matching for them. A label name may appear in both labelsets.
+- The ZIP puts them in `span_labels/` and `document_labels/`; `confidence.csv` files stay at the top level.
+- Difficulty-rating (confidence) metrics are unchanged.

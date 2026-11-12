@@ -341,7 +341,8 @@ func sanitizeName(s string) string {
 // reportReadme generates the root-level README.md bundled with every
 // report ZIP, so someone opening the export cold (without the tool's own
 // README) knows what the files inside mean.
-func reportReadme(labels, annotators []string, criterion, granularity, annotationLevel string) []byte {
+func reportReadme(ds Dataset, criterion, granularity string) []byte {
+	labels, annotators, annotationLevel := ds.Labels, ds.Annotators, ds.Level
 	isDocumentLevel := annotationLevel == "document"
 
 	var b strings.Builder
@@ -351,7 +352,16 @@ func reportReadme(labels, annotators []string, criterion, granularity, annotatio
 	fmt.Fprintf(&b, "Labels           : %s\n", strings.Join(labels, ", "))
 	fmt.Fprintf(&b, "Annotators       : %s\n", strings.Join(annotators, ", "))
 	fmt.Fprintf(&b, "Annotation level : %s\n", annotationLevel)
-	if isDocumentLevel {
+	if ds.IsHybrid() {
+		fmt.Fprintf(&b, "Document labels  : %s\n", strings.Join(ds.DocumentLabels, ", "))
+		fmt.Fprintf(&b, "Criterion        : %s\n", criterion)
+		fmt.Fprintf(&b, "Granularity      : %s\n", granularity)
+		b.WriteString("\nThis is a hybrid task: annotators applied span labels to text and, separately, " +
+			"document labels to whole documents. Span labels are reported under span_labels/ " +
+			"(span matching and coverage agreement); document labels under document_labels/ " +
+			"(agreement on whether each annotator applied the label to the document at all). " +
+			"confidence.csv files are shared and sit at the top level, without a prefix.\n")
+	} else if isDocumentLevel {
 		fmt.Fprintf(&b, "\nAnnotations in this export have no span extent (annotation_level=document), "+
 			"so span matching (precision/recall/F1) does not apply. Coverage agreement instead "+
 			"measures whether each annotator applied the label to the document at all.\n")
@@ -419,15 +429,58 @@ func reportReadme(labels, annotators []string, criterion, granularity, annotatio
 // called before each document is processed (used by the CLI for a progress
 // bar; the server passes nil). Shared by both the CLI and the HTTP server so
 // the zip contents can't drift between the two entry points.
-func writeReportZip(zw *zip.Writer, documents []Document, labels, allAnnotators []string, criterion, granularity, annotationLevel string, onProgress func(current, total int, docName string)) error {
+func writeReportZip(zw *zip.Writer, ds Dataset, criterion, granularity string, onProgress func(current, total int, docName string)) error {
 	readmeEntry, err := zw.Create("README.md")
 	if err != nil {
 		return fmt.Errorf("creating README.md: %w", err)
 	}
-	if _, err := readmeEntry.Write(reportReadme(labels, allAnnotators, criterion, granularity, annotationLevel)); err != nil {
+	if _, err := readmeEntry.Write(reportReadme(ds, criterion, granularity)); err != nil {
 		return fmt.Errorf("writing README.md: %w", err)
 	}
 
+	if ds.IsHybrid() {
+		// Span and document labels live in separate folders so a label name
+		// used in both labelsets cannot collide.
+		if err := writeLabelSection(zw, "span_labels/", ds.Documents, ds.Labels, ds.Annotators, criterion, granularity, "span", onProgress); err != nil {
+			return err
+		}
+		if err := writeLabelSection(zw, "document_labels/", documentView(ds.Documents), ds.DocumentLabels, ds.Annotators, criterion, granularity, "document", nil); err != nil {
+			return err
+		}
+	} else if err := writeLabelSection(zw, "", ds.Documents, ds.Labels, ds.Annotators, criterion, granularity, ds.Level, onProgress); err != nil {
+		return err
+	}
+
+	// Confidence is per assignment, not per label, so it is written once.
+	for i, doc := range ds.Documents {
+		docName := sanitizeName(stripExt(doc.Name))
+		if docName == "" {
+			docName = fmt.Sprintf("document_%d", i+1)
+		}
+		docDir := fmt.Sprintf("documents/%s", docName)
+		confidenceEntry, err := zw.Create(docDir + "/confidence.csv")
+		if err != nil {
+			return fmt.Errorf("creating %s/confidence.csv: %w", docDir, err)
+		}
+		if _, err := confidenceEntry.Write(confidenceCSV([]Document{doc}, docAnnotators(doc))); err != nil {
+			return fmt.Errorf("writing %s/confidence.csv: %w", docDir, err)
+		}
+	}
+
+	aggConfidence, err := zw.Create("aggregated/confidence.csv")
+	if err != nil {
+		return fmt.Errorf("creating aggregated/confidence.csv: %w", err)
+	}
+	if _, err := aggConfidence.Write(confidenceCSV(ds.Documents, ds.Annotators)); err != nil {
+		return fmt.Errorf("writing aggregated/confidence.csv: %w", err)
+	}
+
+	return nil
+}
+
+// writeLabelSection writes the per-document and aggregated metrics and
+// annotations files for one set of labels, under prefix.
+func writeLabelSection(zw *zip.Writer, prefix string, documents []Document, labels, allAnnotators []string, criterion, granularity, annotationLevel string, onProgress func(current, total int, docName string)) error {
 	for i, doc := range documents {
 		if onProgress != nil {
 			onProgress(i+1, len(documents), doc.Name)
@@ -440,7 +493,7 @@ func writeReportZip(zw *zip.Writer, documents []Document, labels, allAnnotators 
 		docAnns := docAnnotators(doc)
 
 		for _, label := range labels {
-			labelDir := fmt.Sprintf("documents/%s/%s", docName, sanitizeName(label))
+			labelDir := fmt.Sprintf("%sdocuments/%s/%s", prefix, docName, sanitizeName(label))
 
 			metricsEntry, err := zw.Create(labelDir + "/metrics.csv")
 			if err != nil {
@@ -458,19 +511,10 @@ func writeReportZip(zw *zip.Writer, documents []Document, labels, allAnnotators 
 				return fmt.Errorf("writing %s/annotations.csv: %w", labelDir, err)
 			}
 		}
-
-		docDir := fmt.Sprintf("documents/%s", docName)
-		confidenceEntry, err := zw.Create(docDir + "/confidence.csv")
-		if err != nil {
-			return fmt.Errorf("creating %s/confidence.csv: %w", docDir, err)
-		}
-		if _, err := confidenceEntry.Write(confidenceCSV([]Document{doc}, docAnns)); err != nil {
-			return fmt.Errorf("writing %s/confidence.csv: %w", docDir, err)
-		}
 	}
 
 	for _, label := range labels {
-		aggDir := fmt.Sprintf("aggregated/%s", sanitizeName(label))
+		aggDir := fmt.Sprintf("%saggregated/%s", prefix, sanitizeName(label))
 
 		aggMetrics, err := zw.Create(aggDir + "/metrics.csv")
 		if err != nil {
@@ -488,15 +532,6 @@ func writeReportZip(zw *zip.Writer, documents []Document, labels, allAnnotators 
 			return fmt.Errorf("writing %s/annotations.csv: %w", aggDir, err)
 		}
 	}
-
-	aggConfidence, err := zw.Create("aggregated/confidence.csv")
-	if err != nil {
-		return fmt.Errorf("creating aggregated/confidence.csv: %w", err)
-	}
-	if _, err := aggConfidence.Write(confidenceCSV(documents, allAnnotators)); err != nil {
-		return fmt.Errorf("writing aggregated/confidence.csv: %w", err)
-	}
-
 	return nil
 }
 
@@ -543,7 +578,7 @@ func RunCLI() {
 	fmt.Printf("Output       : %s\n\n", *output)
 
 	// Load raw data (needed for per-document loop)
-	labels, allAnnotators, documents, annotationLevel, err := loadData(*input)
+	ds, err := loadData(*input)
 	if err != nil {
 		log.Fatalf("error loading data: %v", err)
 	}
@@ -569,8 +604,8 @@ func RunCLI() {
 	zw := zip.NewWriter(zipFile)
 	defer zw.Close()
 
-	fmt.Printf("Processing %d documents...\n", len(documents))
-	if err := writeReportZip(zw, documents, labels, allAnnotators, *criterion, *granularity, annotationLevel, printProgress); err != nil {
+	fmt.Printf("Processing %d documents...\n", len(ds.Documents))
+	if err := writeReportZip(zw, ds, *criterion, *granularity, printProgress); err != nil {
 		log.Fatalf("error writing report: %v", err)
 	}
 	fmt.Fprintln(os.Stderr) // end progress bar line
@@ -578,7 +613,7 @@ func RunCLI() {
 	fmt.Printf("\nReport written to: %s\n", *output)
 	fmt.Printf("  aggregated/{label}/metrics.csv + annotations.csv, aggregated/confidence.csv\n")
 	fmt.Printf("  documents/{doc}/{label}/metrics.csv + annotations.csv, documents/{doc}/confidence.csv  (%d documents × %d labels)\n\n",
-		len(documents), len(labels))
+		len(ds.Documents), len(ds.Labels)+len(ds.DocumentLabels))
 
 	// Summary table
 	isDocumentLevel := report.Meta.AnnotationLevel == "document"
@@ -623,6 +658,23 @@ func RunCLI() {
 			fmt.Printf("%-*s%s\n", colW, label, covStr)
 		} else {
 			fmt.Printf("%-*s%s%s\n", colW, label, f1Str, covStr)
+		}
+	}
+
+	if len(report.PerDocumentLabel) > 0 {
+		fmt.Printf("\nDocument labels\n%-*s %8s\n", colW, "Label", "label α")
+		fmt.Println(strings.Repeat("-", 43))
+		docLabels := make([]string, 0, len(report.PerDocumentLabel))
+		for k := range report.PerDocumentLabel {
+			docLabels = append(docLabels, k)
+		}
+		sort.Strings(docLabels)
+		for _, label := range docLabels {
+			covStr := "     N/A"
+			if a := report.PerDocumentLabel[label].CoverageAgreement.KrippendorffAlpha; a.Valid {
+				covStr = fmt.Sprintf("%.4f", a.Value)
+			}
+			fmt.Printf("%-*s%s\n", colW, label, covStr)
 		}
 	}
 }

@@ -24,10 +24,17 @@ type Annotation struct {
 	Text  string `json:"text"`
 }
 
+// DocumentAnnotation is a label applied to a whole document. Only present in
+// hybrid input (annotation_level == "hybrid"), alongside span Annotations.
+type DocumentAnnotation struct {
+	Label string `json:"label"`
+}
+
 type Assignment struct {
-	Annotator        interface{}  `json:"annotator"` // int or string in the wild
-	DifficultyRating int          `json:"difficulty_rating"`
-	Annotations      []Annotation `json:"annotations"`
+	Annotator           interface{}          `json:"annotator"` // int or string in the wild
+	DifficultyRating    int                  `json:"difficulty_rating"`
+	Annotations         []Annotation         `json:"annotations"`
+	DocumentAnnotations []DocumentAnnotation `json:"document_annotations,omitempty"`
 }
 
 type Document struct {
@@ -44,10 +51,47 @@ type Labelset struct {
 	Labels []Label `json:"labels"`
 }
 
+// InputData is the request body. For annotation_level == "hybrid", Labelset
+// holds the span labels and DocumentLabelset the whole-document labels; each
+// assignment then carries both Annotations (spans) and DocumentAnnotations.
 type InputData struct {
-	Labelset        Labelset   `json:"labelset"`
-	Documents       []Document `json:"documents"`
-	AnnotationLevel string     `json:"annotation_level"`
+	Labelset         Labelset   `json:"labelset"`
+	DocumentLabelset Labelset   `json:"document_labelset"`
+	Documents        []Document `json:"documents"`
+	AnnotationLevel  string     `json:"annotation_level"`
+}
+
+// Dataset is the input after extraction: label names, the annotators found,
+// and the documents.
+type Dataset struct {
+	Labels         []string // span labels (or the only labels for non-hybrid input)
+	DocumentLabels []string // hybrid only
+	Annotators     []string
+	Documents      []Document
+	Level          string // "span" | "document" | "hybrid"
+}
+
+func (d Dataset) IsHybrid() bool { return d.Level == "hybrid" }
+
+// documentView returns the documents with each assignment's document-level
+// annotations exposed as ordinary annotations (no extent), so the
+// document-level computations can run on them unchanged.
+func documentView(documents []Document) []Document {
+	out := make([]Document, len(documents))
+	for i, doc := range documents {
+		nd := doc
+		nd.Assignments = make([]Assignment, len(doc.Assignments))
+		for j, asgn := range doc.Assignments {
+			na := asgn
+			na.Annotations = make([]Annotation, len(asgn.DocumentAnnotations))
+			for k, da := range asgn.DocumentAnnotations {
+				na.Annotations[k] = Annotation{Label: da.Label}
+			}
+			nd.Assignments[j] = na
+		}
+		out[i] = nd
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +160,8 @@ type Meta struct {
 type Report struct {
 	Meta     Meta                   `json:"meta"`
 	PerLabel map[string]LabelResult `json:"per_label"`
+	// PerDocumentLabel holds the whole-document labels' agreement. Hybrid only.
+	PerDocumentLabel map[string]LabelResult `json:"per_document_label,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -569,25 +615,29 @@ func spanCounts(documents []Document, label string, annotators []string) map[str
 }
 
 // loadData reads a LawNotation JSON export from disk (CLI path).
-func loadData(path string) ([]string, []string, []Document, string, error) {
+func loadData(path string) (Dataset, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return Dataset{}, err
 	}
 	defer f.Close()
 	return loadDataFromReader(f)
 }
 
+func labelNames(ls Labelset) []string {
+	names := make([]string, len(ls.Labels))
+	for i, l := range ls.Labels {
+		names[i] = l.Name
+	}
+	return names
+}
+
 // loadDataFromReader reads a LawNotation JSON export from any reader (e.g. an
 // HTTP request body), sharing the same extraction logic as loadData.
-func loadDataFromReader(r io.Reader) ([]string, []string, []Document, string, error) {
+func loadDataFromReader(r io.Reader) (Dataset, error) {
 	var raw InputData
 	if err := json.NewDecoder(r).Decode(&raw); err != nil {
-		return nil, nil, nil, "", err
-	}
-	labels := make([]string, len(raw.Labelset.Labels))
-	for i, l := range raw.Labelset.Labels {
-		labels[i] = l.Name
+		return Dataset{}, err
 	}
 	annotatorSet := map[string]bool{}
 	for _, doc := range raw.Documents {
@@ -600,11 +650,20 @@ func loadDataFromReader(r io.Reader) ([]string, []string, []Document, string, er
 		annotators = append(annotators, a)
 	}
 	sort.Strings(annotators)
-	annotationLevel := raw.AnnotationLevel
-	if annotationLevel == "" {
-		annotationLevel = "span"
+	level := raw.AnnotationLevel
+	if level == "" {
+		level = "span"
 	}
-	return labels, annotators, raw.Documents, annotationLevel, nil
+	ds := Dataset{
+		Labels:     labelNames(raw.Labelset),
+		Annotators: annotators,
+		Documents:  raw.Documents,
+		Level:      level,
+	}
+	if level == "hybrid" {
+		ds.DocumentLabels = labelNames(raw.DocumentLabelset)
+	}
+	return ds, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -625,17 +684,32 @@ func safeMean(vals []float64) NullFloat64 {
 // computeIAA loads a LawNotation JSON export from disk and computes the
 // full IAA report (CLI path).
 func computeIAA(inputPath, criterion, granularity string) (Report, error) {
-	labels, annotators, documents, annotationLevel, err := loadData(inputPath)
+	ds, err := loadData(inputPath)
 	if err != nil {
 		return Report{}, err
 	}
-	return computeIAAFromData(inputPath, labels, annotators, documents, annotationLevel, criterion, granularity), nil
+	return computeIAAFromData(inputPath, ds, criterion, granularity), nil
 }
 
 // computeIAAFromData computes the full IAA report from already-loaded data,
 // so callers that already have the data in memory (e.g. an HTTP handler
 // reading a request body) don't need to round-trip through a file path.
-func computeIAAFromData(inputLabel string, labels, annotators []string, documents []Document, annotationLevel, criterion, granularity string) Report {
+func computeIAAFromData(inputLabel string, ds Dataset, criterion, granularity string) Report {
+	if !ds.IsHybrid() {
+		return computeLevelReport(inputLabel, ds.Labels, ds.Annotators, ds.Documents, ds.Level, criterion, granularity)
+	}
+	// Hybrid: span labels get the span pipeline, document labels get the
+	// document-level (presence) pipeline over the same annotators.
+	report := computeLevelReport(inputLabel, ds.Labels, ds.Annotators, ds.Documents, "span", criterion, granularity)
+	docPart := computeLevelReport(inputLabel, ds.DocumentLabels, ds.Annotators, documentView(ds.Documents), "document", criterion, granularity)
+	report.Meta.AnnotationLevel = "hybrid"
+	report.Meta.Notes["document_labels"] = docPart.Meta.Notes["coverage_agreement"]
+	report.PerDocumentLabel = docPart.PerLabel
+	return report
+}
+
+// computeLevelReport computes the report for one level ("span" or "document").
+func computeLevelReport(inputLabel string, labels, annotators []string, documents []Document, annotationLevel, criterion, granularity string) Report {
 	isDocumentLevel := annotationLevel == "document"
 	notes := map[string]string{
 		"coverage_agreement": fmt.Sprintf(
