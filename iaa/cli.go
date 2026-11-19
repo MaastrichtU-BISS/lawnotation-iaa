@@ -126,11 +126,12 @@ func printSummary(data TaskData, report Report) {
 	const labelWidth = 34
 	fmt.Printf("%-*s %-9s %8s %10s %10s\n", labelWidth, "Label", "Kind", "alpha", "F1 strict", "F1 lenient")
 	fmt.Println(strings.Repeat("-", labelWidth+41))
+	// Fixed decimals so the column lines up; the CSVs keep num's shortest form.
 	cell := func(v NullFloat64) string {
 		if !v.Valid {
 			return "-"
 		}
-		return num(v)
+		return fmt.Sprintf("%.4f", v.Value)
 	}
 	for _, g := range labelGroups(data, report) {
 		for _, label := range g.labels {
