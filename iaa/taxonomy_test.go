@@ -221,7 +221,7 @@ func TestUnknownLabelsAreIgnored(t *testing.T) {
 	}
 }
 
-func TestAnnotationLevelReadUnderEitherName(t *testing.T) {
+func TestAnnotationLevelIsSpanDocumentOrHybrid(t *testing.T) {
 	cases := []struct {
 		name string
 		raw  InputData
@@ -230,6 +230,13 @@ func TestAnnotationLevelReadUnderEitherName(t *testing.T) {
 		{"annotation_level wins", InputData{AnnotationLevel: "document", SpanGranularity: "word"}, "document"},
 		{"span_granularity is accepted", InputData{SpanGranularity: "document"}, "document"},
 		{"neither given falls back to span", InputData{}, "span"},
+		{"a granularity is a span task", InputData{SpanGranularity: "symbol"}, "span"},
+		{"an old export's granularity is a span task", InputData{AnnotationLevel: "word"}, "span"},
+		{"a document labelset makes it hybrid", InputData{
+			SpanGranularity:  "word",
+			DocumentLabelset: Labelset{Labels: []Label{{Name: "Relevant"}}},
+		}, "hybrid"},
+		{"hybrid is kept", InputData{AnnotationLevel: "hybrid"}, "hybrid"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

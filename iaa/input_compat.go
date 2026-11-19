@@ -22,18 +22,26 @@ func (a *Assignment) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// annotationLevelOf reads the task's level under either name.
+// annotationLevelOf reports the task as "span", "document" or "hybrid".
 //
-// Lawnotation's download export calls it span_granularity; the payload its
-// server builds for this service calls it annotation_level. Reading only the
-// latter meant a downloaded document-level export silently took the span
-// path: spans there have no extent, so it would have matched zero-length
-// spans and tokenized text that no annotation points into.
+// The payload Lawnotation's server builds for this service already says
+// which, under annotation_level. Its download export does not: there the
+// field is span_granularity — how selections snap while annotating, "symbol",
+// "word", "sentence", "paragraph" or "document" — and exports from before the
+// rename call that same value annotation_level. Only "document" changes how a
+// task is scored; any other granularity is a span task, or a hybrid one when
+// it carries a second, whole-document labelset.
 func annotationLevelOf(raw InputData) string {
-	for _, level := range []string{raw.AnnotationLevel, raw.SpanGranularity} {
-		if level != "" {
-			return level
-		}
+	level := raw.AnnotationLevel
+	if level == "" {
+		level = raw.SpanGranularity
 	}
-	return "span"
+	switch {
+	case level == "document" || level == "hybrid":
+		return level
+	case len(raw.DocumentLabelset.Labels) > 0:
+		return "hybrid"
+	default:
+		return "span"
+	}
 }
