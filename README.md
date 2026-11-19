@@ -15,40 +15,56 @@ This tool reports **two complementary views** per label, each answering a differ
 ## The Two Views
 
 ### View 1 — Span Matching
-> *"If one annotator is the reference, how accurately can another reproduce their spans?"*
+> *"Where do two annotators' spans agree, and how do they differ where they don't?"*
 
-Each annotator is treated as the reference in turn, and their spans are matched 1-to-1 using maximum bipartite matching against the other annotator's spans using the chosen `--criterion`. This finds the assignment that maximises true positives globally, avoiding the underestimation that greedy first-fit produces with overlapping or nested spans. Unmatched spans count as false positives or missed recalls.
+For every pair of annotators, spans are matched 1-to-1 in a single pass: the
+greedy matcher prefers the largest overlap, then identical bounds, then the
+same label, with a full tie-break so the result does not depend on the order
+annotations arrive in. Each span then falls into one of the categories of
+Ortmann's (2022) error taxonomy:
 
-**Metrics:** Precision, Recall, F1 — per pair in both directions, plus macro-average per label.
+| Category | Meaning |
+|----------|---------|
+| matched | same text, same label |
+| boundary differs | same label, overlapping text with different bounds (smaller, larger or shifted) |
+| label differs | same text, different label |
+| both differ | overlapping text, different bounds and label |
+| only one saw it | one annotator marked it, the other marked nothing there |
 
-**Key property:** **Not chance-corrected** and **asymmetric** (precision/recall depend on who is the reference). Best suited for scenarios where one annotator is a gold standard, or for comparing annotation styles directionally. This is the dominant standard in NLP annotation papers (NER, relation extraction, legal NLP).
+**Metrics:** strict and lenient F1 per pair, read from that one matching pass.
+Strict gives a partial match no credit — it counts as a spurious span and a
+missed one. Lenient counts it as half of each. The gap between the two is how
+much of the score rests on partial matches. F1 is symmetric, so each pair is
+reported once.
+
+Per label, a label error cannot occur by construction (both sides hold only
+that label), so the per-label profiles show only matched, boundary and
+only-one categories.
+
+**Key property:** **not chance-corrected.** This is the dominant standard in
+NLP annotation papers (NER, relation extraction, legal NLP).
 
 ---
 
 ### View 2 — Coverage Agreement
 > *"How much text do annotators agree on?"*
 
-Each character or word position across all documents is treated as one item in a binary reliability matrix:
+Each word position across all documents is treated as one item in a binary reliability matrix:
 - `1` — this annotator's span covers this position for this label
 - `0` — assigned to the document, but no span here
 - `None` — annotator was not assigned to this document
 
-**Metrics:** Krippendorff's α and Cohen's κ (all pairs).
+**Metrics:** Krippendorff's α over all annotators, α and Cohen's κ for every
+pair, and α per document (for the documents where anyone used the label).
 
-**Key property:** This view is **length-weighted** — agreeing on a 200-character span contributes far more items than agreeing on a 5-character span. Use it to answer "how much text, in total, is consistently annotated?"
+**Key property:** This view is **length-weighted** — agreeing on a 40-word span contributes far more items than agreeing on a 2-word span — and words nobody marked count as agreement. Use it to answer "how much text, in total, is consistently annotated?"
 
----
+### Document labels
 
-## Matching Criterion
-
-The `--criterion` option controls when two spans are considered a match. It only affects View 1.
-
-| Criterion | Behaviour |
-|-----------|-----------|
-| `exact` | Two spans must have identical `(start, end)` |
-| `contained` | One span must be a subset of the other: `[a,b] ⊆ [c,d]` or vice versa |
-
-> **Note:** `--criterion` has no effect on View 2. For coverage, a token is counted as covered if any span fully contains it — this is always containment-based by construction.
+On a document-level task, and for the second labelset of a hybrid one, a label
+is a tag on a whole document. There is nothing to match and no extent, so only
+View 2 applies, with one item per document: did each annotator apply the label
+to it. There is no per-document α — at a single item α is always 0 or 1.
 
 ---
 
@@ -102,25 +118,20 @@ go run . --input <path/to/data.json> [options]
 | Option | Values | Default | Description |
 |--------|--------|---------|-------------|
 | `--input` | path | *(required)* | Path to the LawNotation JSON export |
-| `--criterion` | `exact` \| `contained` | `exact` | Match condition for View 1 |
-| `--granularity` | `char` \| `word` | `word` | Token unit for View 2 |
 | `--output` | path | `iaa_report.zip` | Output path for the ZIP report |
 
-### Examples
+There are no scoring options: strict and lenient F1 are both always reported,
+and coverage is always counted in words.
 
 ```bash
-# Word-level coverage, lenient (containment) matching
-go run . --input input/data.json --criterion contained --granularity word --output output/report.zip
-
-# Character-level coverage (slower, finer-grained)
-go run . --input input/data.json --granularity char --output output/report-char.zip
+go run . --input input/data.json --output output/report.zip
 ```
 
 To build a standalone binary instead of using `go run`:
 
 ```bash
 go build -o iaa .
-./iaa --input input/data.json --criterion contained --output output/report.zip
+./iaa --input input/data.json --output output/report.zip
 ```
 
 ### Running as a server
@@ -146,17 +157,15 @@ go build -o iaa .
 
 Endpoints (request body is the LawNotation JSON export, same schema as `--input`):
 
-| Endpoint | Query params | Response |
-|----------|--------------|----------|
-| `POST /metrics` | `criterion`, `granularity` (same values/defaults as above) | JSON: `{ "annotation_metrics": <report>, "confidence_metrics": <confidence rating summary> }` |
-| `POST /report.zip` | `criterion`, `granularity` | The same ZIP report the CLI produces |
+| Endpoint | Response |
+|----------|----------|
+| `POST /metrics` | JSON: `{ "annotation_metrics": <report>, "confidence_metrics": <confidence rating summary> }` |
+| `POST /report.zip` | The same ZIP report the CLI produces |
 
 ```bash
-curl -X POST "http://localhost:8080/metrics?criterion=contained&granularity=word" \
-  --data-binary @input/data.json
+curl -X POST "http://localhost:8080/metrics" --data-binary @input/data.json
 
-curl -X POST "http://localhost:8080/report.zip?criterion=contained&granularity=word" \
-  --data-binary @input/data.json -o report.zip
+curl -X POST "http://localhost:8080/report.zip" --data-binary @input/data.json -o report.zip
 ```
 
 #### Authentication
@@ -195,43 +204,44 @@ The mounted paths are `metrics` and `report.zip`, relative to the mount point.
 
 ## Output
 
-The tool prints a summary table to stdout and writes a structured JSON report.
+The tool prints a summary table to stdout and writes a ZIP of a few tidy CSV
+tables, one row per observation.
 
 **Stdout example:**
 ```
 === SUMMARY ===
-  Documents                          : 42
-  Annotators                         : 1, 2, 3
-  Granularity (coverage view)        : word
-  Span matching       - mean F1       : 0.8103
-  Coverage agreement  - mean α        : 0.7821
-  Coverage agreement  - mean κ         : 0.7634
+  Documents        : 900
+  Annotators       : 1, 2, 3
+  Annotation level : span
 
-Label                              F1       cov α    cov κ
------------------------------------------------------------------
-Actors                             0.8450   0.8234   0.8101
-Acts                               0.7900   0.7654   0.7500
+Label                              Kind         alpha  F1 strict F1 lenient
+---------------------------------------------------------------------------
+Postcondition                      span        0.8818     0.6670     0.7675
+Precondition                       span        0.7666     0.6287     0.6662
 ...
 ```
+
+`F1 strict` and `F1 lenient` are the mean over annotator pairs.
 
 **ZIP contents:**
 ```
 report.zip
-├── aggregate.json                        # Full aggregated report (JSON)
-└── documents/
-    ├── _aggregated/                      # Metrics and annotations across all documents
-    │   └── <label>/
-    │       ├── metrics.csv              # Aggregate span matching + coverage for this label
-    │       └── annotations.csv          # All annotations for this label (+ document column)
-    └── <document_name>/                  # File extension stripped (e.g. doc.txt → doc)
-        └── <label>/
-            ├── metrics.csv              # Span matching + coverage metrics for this label
-            └── annotations.csv          # All annotations for this label by each annotator
+├── README.md            # What each table holds, column by column
+├── labels.csv           # One row per label: α, mean strict/lenient F1, how much was marked
+├── pairs.csv            # One row per label and annotator pair: α, κ, both F1s, the error profile
+├── documents.csv        # One row per label and document: α per document
+├── document_pairs.csv   # One row per label, document and pair: both F1s and the error profile there
+├── annotations.csv      # Every annotation, with document and annotator
+├── assignments.csv      # Every assignment: its confidence rating and annotation count
+├── confidence.csv       # Confidence ratings per annotator, and an "all" row
+└── confidence_pairs.csv # α on the confidence ratings for every pair
 ```
 
-**metrics.csv** columns: `pair, direction, tp, ref_count, sys_count, precision, recall, f1` (span matching section) followed by `metric, value` (coverage section with Krippendorff α and Cohen κ).
-
-**annotations.csv** columns: `annotator, start, end, text` (per-document) or `document, annotator, start, end, text` (aggregated).
+The `README.md` inside the archive is generated from the same table
+definitions as the files, so its column list always matches them. An empty
+cell means the value does not exist for that row, never zero. The web client
+(vue-iaa-metrics) adds a `report.pdf` with the results page to the same
+archive.
 
 ### Score interpretation guide (α and κ)
 
@@ -247,6 +257,6 @@ report.zip
 
 ## Dependencies
 
-None. Standard library only (`archive/zip`, `encoding/csv`, `encoding/json`, `flag`, `math`, `os`, `regexp`, `sort`, `strings`). Requires Go 1.18+.
+None. Standard library only. Requires Go 1.23+.
 
 ---
