@@ -16,27 +16,7 @@ import (
 // metricsResponse is the JSON body returned by POST /metrics.
 type metricsResponse struct {
 	AnnotationMetrics Report                  `json:"annotation_metrics"`
-	ConfidenceMetrics DifficultyRatingSummary `json:"confidence_metrics"`
-}
-
-// parseLevelParams reads criterion/granularity query params, applying the
-// same defaults and validation as the CLI flags.
-func parseLevelParams(r *http.Request) (criterion, granularity string, err error) {
-	criterion = r.URL.Query().Get("criterion")
-	if criterion == "" {
-		criterion = "exact"
-	}
-	if criterion != "exact" && criterion != "contained" {
-		return "", "", fmt.Errorf("criterion must be 'exact' or 'contained'")
-	}
-	granularity = r.URL.Query().Get("granularity")
-	if granularity == "" {
-		granularity = "word"
-	}
-	if granularity != "char" && granularity != "word" {
-		return "", "", fmt.Errorf("granularity must be 'char' or 'word'")
-	}
-	return criterion, granularity, nil
+	ConfidenceMetrics ConfidenceRatingSummary `json:"confidence_metrics"`
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
@@ -65,7 +45,7 @@ func requireAPIKey(next http.Handler, apiKey string) http.Handler {
 	})
 }
 
-// handleMetrics handles POST /metrics?criterion=exact&granularity=word.
+// handleMetrics handles POST /metrics.
 // Body: the LawNotation task JSON. Returns annotation + confidence metrics
 // as JSON, for display in a web client.
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -73,19 +53,14 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "use POST")
 		return
 	}
-	criterion, granularity, err := parseLevelParams(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	ds, err := loadDataFromReader(r.Body)
+	data, err := loadDataFromReader(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid input JSON: %v", err))
 		return
 	}
 
-	report := computeIAAFromData("", ds, criterion, granularity)
-	confidence := difficultyRatingSummary(ds.Documents, ds.Annotators)
+	report := computeIAAFromData("", data)
+	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(metricsResponse{
@@ -94,19 +69,14 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleReportZip handles POST /report.zip?criterion=exact&granularity=word.
+// handleReportZip handles POST /report.zip.
 // Body: the LawNotation task JSON. Returns the same ZIP the CLI produces.
 func handleReportZip(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "use POST")
 		return
 	}
-	criterion, granularity, err := parseLevelParams(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	ds, err := loadDataFromReader(r.Body)
+	data, err := loadDataFromReader(r.Body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid input JSON: %v", err))
 		return
@@ -115,7 +85,9 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="iaa_report.zip"`)
 	zw := zip.NewWriter(w)
-	if err := writeReportZip(zw, ds, criterion, granularity, nil); err != nil {
+	report := computeIAAFromData("", data)
+	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
+	if err := writeReportZip(zw, data, report, confidence, nil); err != nil {
 		log.Printf("error writing report zip: %v", err)
 		return
 	}
@@ -128,8 +100,8 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 // application can serve them in-process instead of running this as a separate
 // service. Paths are relative to wherever it is mounted:
 //
-//	POST metrics?criterion=exact&granularity=word
-//	POST report.zip?criterion=exact&granularity=word
+//	POST metrics
+//	POST report.zip
 //
 // Deliberately unauthenticated. The API key exists to protect a service
 // exposed over a network; a host that has compiled this in is already inside
@@ -150,8 +122,8 @@ func runServer(port string) {
 
 	addr := ":" + port
 	log.Printf("IAA server listening on %s", addr)
-	log.Printf("  POST /metrics?criterion=exact&granularity=word     (body: LawNotation task JSON)")
-	log.Printf("  POST /report.zip?criterion=exact&granularity=word  (body: LawNotation task JSON)")
+	log.Printf("  POST /metrics     (body: LawNotation task JSON)")
+	log.Printf("  POST /report.zip  (body: LawNotation task JSON)")
 	if apiKey == "" {
 		log.Printf("WARNING: IAA_API_KEY not set — endpoints are unauthenticated")
 	} else {

@@ -1,17 +1,14 @@
-// cli.go — CLI entry point and output formatting for the IAA tool.
-// All computation logic (types, metrics, data loading) lives in iaa.go.
+// cli.go — the command-line entry point. The report itself is written by
+// export.go, and all computation lives in iaa.go and its siblings.
 package iaa
 
 import (
 	"archive/zip"
-	"encoding/csv"
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -58,484 +55,6 @@ func printProgress(current, total int, docName string) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-document CSV helpers
-// ---------------------------------------------------------------------------
-
-func nullFloatStr(v NullFloat64) string {
-	if !v.Valid {
-		return "N/A"
-	}
-	return fmt.Sprintf("%.4f", math.Round(v.Value*10000)/10000)
-}
-
-// docAnnotators returns sorted annotator IDs present in a single document.
-func docAnnotators(doc Document) []string {
-	seen := map[string]bool{}
-	for _, asgn := range doc.Assignments {
-		seen[fmt.Sprintf("%v", asgn.Annotator)] = true
-	}
-	result := make([]string, 0, len(seen))
-	for a := range seen {
-		result = append(result, a)
-	}
-	sort.Strings(result)
-	return result
-}
-
-// stripExt removes the file extension from a name (e.g. "doc.txt" → "doc").
-func stripExt(name string) string {
-	if ext := filepath.Ext(name); ext != "" {
-		return name[:len(name)-len(ext)]
-	}
-	return name
-}
-
-// metricsCSV generates metrics.csv content for a set of documents and a single label.
-// For annotationLevel=="document" data (annotations with no real span extent),
-// Span Matching is not applicable and is omitted; Coverage Agreement becomes a
-// document-level label-presence agreement instead of token coverage.
-func metricsCSV(docs []Document, label string, annotators []string, criterion, granularity, annotationLevel string) []byte {
-	isDocumentLevel := annotationLevel == "document"
-
-	var buf strings.Builder
-	w := csv.NewWriter(&buf)
-
-	_ = w.Write([]string{"GENERAL"})
-	annCounts := map[string]int{}
-	for _, doc := range docs {
-		for _, asgn := range doc.Assignments {
-			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
-			for _, ann := range asgn.Annotations {
-				if ann.Label == label {
-					annCounts[annotatorID]++
-				}
-			}
-		}
-	}
-	_ = w.Write([]string{"label", label})
-	if len(docs) == 1 {
-		_ = w.Write([]string{"document", stripExt(docs[0].Name)})
-	} else {
-		_ = w.Write([]string{"num_documents", fmt.Sprintf("%d", len(docs))})
-	}
-	_ = w.Write([]string{"annotation_level", annotationLevel})
-	if isDocumentLevel {
-		_ = w.Write([]string{"granularity", "N/A"})
-		_ = w.Write([]string{"criterion", "N/A"})
-	} else {
-		_ = w.Write([]string{"granularity", granularity})
-		_ = w.Write([]string{"criterion", criterion})
-	}
-	_ = w.Write([]string{"annotations_per_annotator"})
-	for _, annotator := range annotators {
-		count := annCounts[annotator]
-		_ = w.Write([]string{annotator, fmt.Sprintf("%d", count)})
-	}
-	_ = w.Write([]string{""})
-
-	if !isDocumentLevel {
-		// — Span Matching —
-		_ = w.Write([]string{"SPAN MATCHING"})
-		_ = w.Write([]string{"pair", "direction", "tp", "ref_count", "sys_count", "precision", "recall", "f1"})
-		pairs := spanMatchingAllPairs(docs, label, annotators, criterion)
-		pairKeys := make([]string, 0, len(pairs))
-		for k := range pairs {
-			pairKeys = append(pairKeys, k)
-		}
-		sort.Strings(pairKeys)
-		for _, pairKey := range pairKeys {
-			dirMap := pairs[pairKey]
-			dirKeys := make([]string, 0, len(dirMap))
-			for k := range dirMap {
-				dirKeys = append(dirKeys, k)
-			}
-			sort.Strings(dirKeys)
-			for _, dirKey := range dirKeys {
-				r := dirMap[dirKey]
-				_ = w.Write([]string{
-					pairKey, dirKey,
-					fmt.Sprintf("%d", r.TruePositives),
-					fmt.Sprintf("%d", r.RefSpanCount),
-					fmt.Sprintf("%d", r.SysSpanCount),
-					nullFloatStr(r.Precision),
-					nullFloatStr(r.Recall),
-					nullFloatStr(r.F1),
-				})
-			}
-		}
-
-		// macro F1 (mean across all pair directions)
-		var f1vals []float64
-		for _, pairResult := range pairs {
-			for _, dir := range pairResult {
-				if dir.F1.Valid {
-					f1vals = append(f1vals, dir.F1.Value)
-				}
-			}
-		}
-		macroF1 := safeMean(f1vals)
-		_ = w.Write([]string{"macro_f1", nullFloatStr(macroF1)})
-		_ = w.Write([]string{""})
-	}
-
-	// — Coverage / Label Agreement —
-	var covMatrix [][]*float64
-	if isDocumentLevel {
-		_ = w.Write([]string{"LABEL AGREEMENT"})
-		covMatrix = buildPresenceMatrix(docs, label, annotators)
-	} else {
-		_ = w.Write([]string{"COVERAGE AGREEMENT"})
-		covMatrix = buildCoverageMatrix(docs, label, annotators, granularity)
-	}
-	matrixItems := 0
-	if len(covMatrix) > 0 {
-		matrixItems = len(covMatrix[0])
-	}
-	_ = w.Write([]string{"matrix_items", fmt.Sprintf("%d", matrixItems)})
-	covAlpha := krippendorffAlpha(covMatrix)
-	covKappas := cohenKappaAllPairs(covMatrix, annotators)
-
-	_ = w.Write([]string{"krippendorff_alpha", nullFloatStr(covAlpha)})
-	_ = w.Write([]string{"cohen_kappa_pairs"})
-	kappaKeys := make([]string, 0, len(covKappas))
-	for k := range covKappas {
-		kappaKeys = append(kappaKeys, k)
-	}
-	sort.Strings(kappaKeys)
-	for _, k := range kappaKeys {
-		_ = w.Write([]string{k, nullFloatStr(covKappas[k])})
-	}
-
-	w.Flush()
-	return []byte(buf.String())
-}
-
-// confidenceCSV generates confidence.csv content: difficulty_rating stats
-// and Krippendorff's alpha across annotators for a set of documents. This is
-// independent of label, so it's written once per document (or once for the
-// aggregate) rather than duplicated inside every label's metrics.csv.
-func confidenceCSV(docs []Document, annotators []string) []byte {
-	var buf strings.Builder
-	w := csv.NewWriter(&buf)
-
-	diff := difficultyRatingSummary(docs, annotators)
-	_ = w.Write([]string{"total", fmt.Sprintf("%d", diff.Total)})
-	_ = w.Write([]string{"rated", fmt.Sprintf("%d", diff.Rated)})
-	_ = w.Write([]string{"mean", nullFloatStr(diff.Mean)})
-	for star := 1; star <= 5; star++ {
-		_ = w.Write([]string{fmt.Sprintf("star_%d", star), fmt.Sprintf("%d", diff.Counts[star])})
-	}
-	_ = w.Write([]string{"krippendorff_alpha", nullFloatStr(diff.Alpha)})
-	_ = w.Write([]string{"krippendorff_alpha_pairs"})
-	pairKeys := make([]string, 0, len(diff.AlphaPairs))
-	for k := range diff.AlphaPairs {
-		pairKeys = append(pairKeys, k)
-	}
-	sort.Strings(pairKeys)
-	for _, k := range pairKeys {
-		_ = w.Write([]string{k, nullFloatStr(diff.AlphaPairs[k])})
-	}
-
-	w.Flush()
-	return []byte(buf.String())
-}
-
-// labelAnnotationsCSV generates annotations.csv content for one document+label.
-// For annotationLevel=="document" data, start/end/text/difficulty_rating are
-// omitted: start/end/text are always trivial (0, 0, "") at that level, and
-// difficulty_rating is already reported per document/annotator in
-// confidence.csv, so repeating it per annotation row here adds nothing.
-func labelAnnotationsCSV(doc Document, label, annotationLevel string) []byte {
-	var buf strings.Builder
-	w := csv.NewWriter(&buf)
-	if annotationLevel == "document" {
-		_ = w.Write([]string{"annotator"})
-		for _, asgn := range doc.Assignments {
-			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
-			for _, ann := range asgn.Annotations {
-				if ann.Label == label {
-					_ = w.Write([]string{annotatorID})
-				}
-			}
-		}
-		w.Flush()
-		return []byte(buf.String())
-	}
-	_ = w.Write([]string{"annotator", "difficulty_rating", "start", "end", "text"})
-	for _, asgn := range doc.Assignments {
-		annotatorID := fmt.Sprintf("%v", asgn.Annotator)
-		for _, ann := range asgn.Annotations {
-			if ann.Label == label {
-				_ = w.Write([]string{
-					annotatorID,
-					fmt.Sprintf("%d", asgn.DifficultyRating),
-					fmt.Sprintf("%d", ann.Start),
-					fmt.Sprintf("%d", ann.End),
-					ann.Text,
-				})
-			}
-		}
-	}
-	w.Flush()
-	return []byte(buf.String())
-}
-
-// aggregatedAnnotationsCSV generates annotations.csv for a label across all documents,
-// with an additional "document" column identifying the source document. See
-// labelAnnotationsCSV for why start/end/text/difficulty_rating are omitted
-// for annotationLevel=="document" data.
-func aggregatedAnnotationsCSV(documents []Document, label, annotationLevel string) []byte {
-	var buf strings.Builder
-	w := csv.NewWriter(&buf)
-	if annotationLevel == "document" {
-		_ = w.Write([]string{"document", "annotator"})
-		for _, doc := range documents {
-			for _, asgn := range doc.Assignments {
-				annotatorID := fmt.Sprintf("%v", asgn.Annotator)
-				for _, ann := range asgn.Annotations {
-					if ann.Label == label {
-						_ = w.Write([]string{stripExt(doc.Name), annotatorID})
-					}
-				}
-			}
-		}
-		w.Flush()
-		return []byte(buf.String())
-	}
-	_ = w.Write([]string{"document", "annotator", "difficulty_rating", "start", "end", "text"})
-	for _, doc := range documents {
-		for _, asgn := range doc.Assignments {
-			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
-			for _, ann := range asgn.Annotations {
-				if ann.Label == label {
-					_ = w.Write([]string{
-						stripExt(doc.Name),
-						annotatorID,
-						fmt.Sprintf("%d", asgn.DifficultyRating),
-						fmt.Sprintf("%d", ann.Start),
-						fmt.Sprintf("%d", ann.End),
-						ann.Text,
-					})
-				}
-			}
-		}
-	}
-	w.Flush()
-	return []byte(buf.String())
-}
-
-// sanitizeName replaces characters unsafe in zip entry paths.
-func sanitizeName(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
-			b.WriteRune('_')
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-// reportReadme generates the root-level README.md bundled with every
-// report ZIP, so someone opening the export cold (without the tool's own
-// README) knows what the files inside mean.
-func reportReadme(ds Dataset, criterion, granularity string) []byte {
-	labels, annotators, annotationLevel := ds.Labels, ds.Annotators, ds.Level
-	isDocumentLevel := annotationLevel == "document"
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "# IAA Report\n\n")
-	fmt.Fprintf(&b, "This ZIP was generated by the IAA tool and reports inter-annotator agreement "+
-		"over a LawNotation (https://app.lawnotation.org) export.\n\n")
-	fmt.Fprintf(&b, "Labels           : %s\n", strings.Join(labels, ", "))
-	fmt.Fprintf(&b, "Annotators       : %s\n", strings.Join(annotators, ", "))
-	fmt.Fprintf(&b, "Annotation level : %s\n", annotationLevel)
-	if ds.IsHybrid() {
-		fmt.Fprintf(&b, "Document labels  : %s\n", strings.Join(ds.DocumentLabels, ", "))
-		fmt.Fprintf(&b, "Criterion        : %s\n", criterion)
-		fmt.Fprintf(&b, "Granularity      : %s\n", granularity)
-		b.WriteString("\nThis is a hybrid task: annotators applied span labels to text and, separately, " +
-			"document labels to whole documents. Span labels are reported under span_labels/ " +
-			"(span matching and coverage agreement); document labels under document_labels/ " +
-			"(agreement on whether each annotator applied the label to the document at all). " +
-			"confidence.csv files are shared and sit at the top level, without a prefix.\n")
-	} else if isDocumentLevel {
-		fmt.Fprintf(&b, "\nAnnotations in this export have no span extent (annotation_level=document), "+
-			"so span matching (precision/recall/F1) does not apply. Coverage agreement instead "+
-			"measures whether each annotator applied the label to the document at all.\n")
-	} else {
-		fmt.Fprintf(&b, "Criterion        : %s\n", criterion)
-		fmt.Fprintf(&b, "Granularity      : %s\n", granularity)
-	}
-
-	b.WriteString("\n## Folder layout\n\n")
-	b.WriteString("```\n")
-	b.WriteString("aggregated/<label>/metrics.csv        metrics for <label> across all documents\n")
-	b.WriteString("aggregated/<label>/annotations.csv    every annotation for <label> (+ document column)\n")
-	b.WriteString("aggregated/confidence.csv             difficulty-rating agreement across all documents\n")
-	b.WriteString("documents/<doc>/<label>/metrics.csv       metrics for <label> restricted to <doc>\n")
-	b.WriteString("documents/<doc>/<label>/annotations.csv   annotations for <label> in <doc>\n")
-	b.WriteString("documents/<doc>/confidence.csv            difficulty-rating agreement for <doc>\n")
-	b.WriteString("```\n")
-
-	b.WriteString("\n## metrics.csv\n\n")
-	if !isDocumentLevel {
-		b.WriteString("**SPAN MATCHING** — `pair, direction, tp, ref_count, sys_count, precision, recall, f1`. " +
-			"Each annotator is matched against the other as the reference in turn, using maximum bipartite " +
-			"matching under the `criterion` above (`exact` = identical start/end, `contained` = one span " +
-			"subset of the other). Not chance-corrected; precision/recall are asymmetric, so both directions " +
-			"per pair are reported. `macro_f1` is the mean F1 across all pair-directions.\n\n")
-		b.WriteString("**COVERAGE AGREEMENT** — Krippendorff's alpha and Cohen's kappa computed over a " +
-			"reliability matrix where each " + granularity + " position across all documents is scored 1 " +
-			"(covered by this annotator's span), 0 (not covered), or left out entirely if the annotator " +
-			"wasn't assigned to that document. Length-weighted: agreeing on a long span counts for more " +
-			"than agreeing on a short one.\n\n")
-	} else {
-		b.WriteString("**LABEL AGREEMENT** — Krippendorff's alpha and Cohen's kappa computed over whether " +
-			"each annotator applied the label to the document at all (1/0), since annotations have no span " +
-			"extent at this annotation level.\n\n")
-	}
-	b.WriteString("Score interpretation (alpha / kappa):\n\n")
-	b.WriteString("| Range        | Interpretation          |\n")
-	b.WriteString("|--------------|-------------------------|\n")
-	b.WriteString("| < 0.20       | Slight agreement        |\n")
-	b.WriteString("| 0.21 - 0.40  | Fair agreement          |\n")
-	b.WriteString("| 0.41 - 0.60  | Moderate agreement      |\n")
-	b.WriteString("| 0.61 - 0.80  | Substantial agreement   |\n")
-	b.WriteString("| > 0.80       | Almost perfect agreement|\n")
-
-	b.WriteString("\n## annotations.csv\n\n")
-	if isDocumentLevel {
-		b.WriteString("`annotator` (per-document) or `document, annotator` (aggregated) — one row per " +
-			"annotation; start/end/text are omitted since they're trivial at this annotation level.\n")
-	} else {
-		b.WriteString("`annotator, difficulty_rating, start, end, text` (per-document) or " +
-			"`document, annotator, difficulty_rating, start, end, text` (aggregated). " +
-			"`start`/`end` are character offsets into the document's full text.\n")
-	}
-
-	b.WriteString("\n## confidence.csv\n\n")
-	b.WriteString("Summary of the `difficulty_rating` (1-5 stars) each annotator gave their assignment: " +
-		"`total`, `rated`, `mean`, `star_1`..`star_5` counts, and Krippendorff's alpha (`krippendorff_alpha` " +
-		"plus per-pair values) measuring how consistently annotators rated difficulty.\n")
-
-	return []byte(b.String())
-}
-
-// writeReportZip writes the full report (README, per-document and aggregated
-// metrics/annotations/confidence CSVs) into zw. onProgress, if non-nil, is
-// called before each document is processed (used by the CLI for a progress
-// bar; the server passes nil). Shared by both the CLI and the HTTP server so
-// the zip contents can't drift between the two entry points.
-func writeReportZip(zw *zip.Writer, ds Dataset, criterion, granularity string, onProgress func(current, total int, docName string)) error {
-	readmeEntry, err := zw.Create("README.md")
-	if err != nil {
-		return fmt.Errorf("creating README.md: %w", err)
-	}
-	if _, err := readmeEntry.Write(reportReadme(ds, criterion, granularity)); err != nil {
-		return fmt.Errorf("writing README.md: %w", err)
-	}
-
-	if ds.IsHybrid() {
-		// Span and document labels live in separate folders so a label name
-		// used in both labelsets cannot collide.
-		if err := writeLabelSection(zw, "span_labels/", ds.Documents, ds.Labels, ds.Annotators, criterion, granularity, "span", onProgress); err != nil {
-			return err
-		}
-		if err := writeLabelSection(zw, "document_labels/", documentView(ds.Documents), ds.DocumentLabels, ds.Annotators, criterion, granularity, "document", nil); err != nil {
-			return err
-		}
-	} else if err := writeLabelSection(zw, "", ds.Documents, ds.Labels, ds.Annotators, criterion, granularity, ds.Level, onProgress); err != nil {
-		return err
-	}
-
-	// Confidence is per assignment, not per label, so it is written once.
-	for i, doc := range ds.Documents {
-		docName := sanitizeName(stripExt(doc.Name))
-		if docName == "" {
-			docName = fmt.Sprintf("document_%d", i+1)
-		}
-		docDir := fmt.Sprintf("documents/%s", docName)
-		confidenceEntry, err := zw.Create(docDir + "/confidence.csv")
-		if err != nil {
-			return fmt.Errorf("creating %s/confidence.csv: %w", docDir, err)
-		}
-		if _, err := confidenceEntry.Write(confidenceCSV([]Document{doc}, docAnnotators(doc))); err != nil {
-			return fmt.Errorf("writing %s/confidence.csv: %w", docDir, err)
-		}
-	}
-
-	aggConfidence, err := zw.Create("aggregated/confidence.csv")
-	if err != nil {
-		return fmt.Errorf("creating aggregated/confidence.csv: %w", err)
-	}
-	if _, err := aggConfidence.Write(confidenceCSV(ds.Documents, ds.Annotators)); err != nil {
-		return fmt.Errorf("writing aggregated/confidence.csv: %w", err)
-	}
-
-	return nil
-}
-
-// writeLabelSection writes the per-document and aggregated metrics and
-// annotations files for one set of labels, under prefix.
-func writeLabelSection(zw *zip.Writer, prefix string, documents []Document, labels, allAnnotators []string, criterion, granularity, annotationLevel string, onProgress func(current, total int, docName string)) error {
-	for i, doc := range documents {
-		if onProgress != nil {
-			onProgress(i+1, len(documents), doc.Name)
-		}
-
-		docName := sanitizeName(stripExt(doc.Name))
-		if docName == "" {
-			docName = fmt.Sprintf("document_%d", i+1)
-		}
-		docAnns := docAnnotators(doc)
-
-		for _, label := range labels {
-			labelDir := fmt.Sprintf("%sdocuments/%s/%s", prefix, docName, sanitizeName(label))
-
-			metricsEntry, err := zw.Create(labelDir + "/metrics.csv")
-			if err != nil {
-				return fmt.Errorf("creating %s/metrics.csv: %w", labelDir, err)
-			}
-			if _, err := metricsEntry.Write(metricsCSV([]Document{doc}, label, docAnns, criterion, granularity, annotationLevel)); err != nil {
-				return fmt.Errorf("writing %s/metrics.csv: %w", labelDir, err)
-			}
-
-			annotationsEntry, err := zw.Create(labelDir + "/annotations.csv")
-			if err != nil {
-				return fmt.Errorf("creating %s/annotations.csv: %w", labelDir, err)
-			}
-			if _, err := annotationsEntry.Write(labelAnnotationsCSV(doc, label, annotationLevel)); err != nil {
-				return fmt.Errorf("writing %s/annotations.csv: %w", labelDir, err)
-			}
-		}
-	}
-
-	for _, label := range labels {
-		aggDir := fmt.Sprintf("%saggregated/%s", prefix, sanitizeName(label))
-
-		aggMetrics, err := zw.Create(aggDir + "/metrics.csv")
-		if err != nil {
-			return fmt.Errorf("creating %s/metrics.csv: %w", aggDir, err)
-		}
-		if _, err := aggMetrics.Write(metricsCSV(documents, label, allAnnotators, criterion, granularity, annotationLevel)); err != nil {
-			return fmt.Errorf("writing %s/metrics.csv: %w", aggDir, err)
-		}
-
-		aggAnnotations, err := zw.Create(aggDir + "/annotations.csv")
-		if err != nil {
-			return fmt.Errorf("creating %s/annotations.csv: %w", aggDir, err)
-		}
-		if _, err := aggAnnotations.Write(aggregatedAnnotationsCSV(documents, label, annotationLevel)); err != nil {
-			return fmt.Errorf("writing %s/annotations.csv: %w", aggDir, err)
-		}
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -546,8 +65,6 @@ func RunCLI() {
 	loadDotEnv()
 
 	input := flag.String("input", "", "Path to LawNotation JSON export (required unless --serve)")
-	criterion := flag.String("criterion", "exact", "Match criterion: exact|contained")
-	granularity := flag.String("granularity", "word", "Coverage granularity: char|word")
 	output := flag.String("output", "iaa_report.zip", "Output ZIP path")
 	serve := flag.Bool("serve", false, "Start an HTTP server (POST /metrics, POST /report.zip) instead of running as a one-off CLI batch")
 	port := flag.String("port", "8080", "Port to listen on in --serve mode")
@@ -563,34 +80,18 @@ func RunCLI() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *criterion != "exact" && *criterion != "contained" {
-		fmt.Fprintln(os.Stderr, "error: --criterion must be 'exact' or 'contained'")
-		os.Exit(1)
-	}
-	if *granularity != "char" && *granularity != "word" {
-		fmt.Fprintln(os.Stderr, "error: --granularity must be 'char' or 'word'")
-		os.Exit(1)
-	}
 
 	fmt.Printf("Input        : %s\n", *input)
-	fmt.Printf("Criterion    : %s\n", *criterion)
-	fmt.Printf("Granularity  : %s\n", *granularity)
 	fmt.Printf("Output       : %s\n\n", *output)
 
-	// Load raw data (needed for per-document loop)
-	ds, err := loadData(*input)
+	data, err := loadData(*input)
 	if err != nil {
 		log.Fatalf("error loading data: %v", err)
 	}
+	fmt.Println("Computing agreement...")
+	report := computeIAAFromData(*input, data)
+	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
 
-	// Aggregate report
-	fmt.Println("Computing aggregate report...")
-	report, err := computeIAA(*input, *criterion, *granularity)
-	if err != nil {
-		log.Fatalf("error: %v", err)
-	}
-
-	// Create zip (ensure parent directory exists)
 	if dir := filepath.Dir(*output); dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			log.Fatalf("error creating output directory: %v", err)
@@ -604,77 +105,40 @@ func RunCLI() {
 	zw := zip.NewWriter(zipFile)
 	defer zw.Close()
 
-	fmt.Printf("Processing %d documents...\n", len(ds.Documents))
-	if err := writeReportZip(zw, ds, *criterion, *granularity, printProgress); err != nil {
+	fmt.Printf("Comparing %d documents...\n", len(data.Documents))
+	if err := writeReportZip(zw, data, report, confidence, printProgress); err != nil {
 		log.Fatalf("error writing report: %v", err)
 	}
 	fmt.Fprintln(os.Stderr) // end progress bar line
+	fmt.Printf("\nReport written to: %s (see README.md inside for what each table holds)\n\n", *output)
 
-	fmt.Printf("\nReport written to: %s\n", *output)
-	fmt.Printf("  aggregated/{label}/metrics.csv + annotations.csv, aggregated/confidence.csv\n")
-	fmt.Printf("  documents/{doc}/{label}/metrics.csv + annotations.csv, documents/{doc}/confidence.csv  (%d documents × %d labels)\n\n",
-		len(ds.Documents), len(ds.Labels)+len(ds.DocumentLabels))
+	printSummary(data, report)
+}
 
-	// Summary table
-	isDocumentLevel := report.Meta.AnnotationLevel == "document"
+// printSummary is the at-a-glance table: one line per label, worst agreement
+// first being left to whoever reads it.
+func printSummary(data TaskData, report Report) {
 	fmt.Println("=== SUMMARY ===")
-	fmt.Printf("  Documents                          : %d\n", report.Meta.NumDocuments)
-	fmt.Printf("  Annotators                         : %s\n", strings.Join(report.Meta.Annotators, ", "))
-	fmt.Printf("  Annotation level                   : %s\n", report.Meta.AnnotationLevel)
-	if !isDocumentLevel {
-		fmt.Printf("  Criterion                      : %s\n", report.Meta.Criterion)
-		fmt.Printf("  Granularity (coverage view)        : %s\n", report.Meta.Granularity)
-	}
-	fmt.Println()
+	fmt.Printf("  Documents        : %d\n", len(data.Documents))
+	fmt.Printf("  Annotators       : %s\n", strings.Join(data.Annotators, ", "))
+	fmt.Printf("  Annotation level : %s\n\n", report.Meta.AnnotationLevel)
 
-	colW := 34
-	if isDocumentLevel {
-		fmt.Printf("%-*s %8s\n", colW, "Label", "label α")
-		fmt.Println(strings.Repeat("-", 43))
-	} else {
-		fmt.Printf("%-*s %8s %8s\n", colW, "Label", "F1", "cov α")
-		fmt.Println(strings.Repeat("-", 56))
-	}
-
-	labelNames := make([]string, 0, len(report.PerLabel))
-	for k := range report.PerLabel {
-		labelNames = append(labelNames, k)
-	}
-	sort.Strings(labelNames)
-
-	for _, label := range labelNames {
-		v := report.PerLabel[label]
-		f1Val := v.SpanMatching.MacroF1
-		covA := v.CoverageAgreement.KrippendorffAlpha
-
-		f1Str, covStr := "     N/A", "     N/A"
-		if f1Val.Valid {
-			f1Str = fmt.Sprintf("%.4f", f1Val.Value)
+	const labelWidth = 34
+	fmt.Printf("%-*s %-9s %8s %10s %10s\n", labelWidth, "Label", "Kind", "alpha", "F1 strict", "F1 lenient")
+	fmt.Println(strings.Repeat("-", labelWidth+41))
+	// Fixed decimals so the column lines up; the CSVs keep num's shortest form.
+	cell := func(v NullFloat64) string {
+		if !v.Valid {
+			return "-"
 		}
-		if covA.Valid {
-			covStr = fmt.Sprintf("%.4f", covA.Value)
-		}
-		if isDocumentLevel {
-			fmt.Printf("%-*s%s\n", colW, label, covStr)
-		} else {
-			fmt.Printf("%-*s%s%s\n", colW, label, f1Str, covStr)
-		}
+		return fmt.Sprintf("%.4f", v.Value)
 	}
-
-	if len(report.PerDocumentLabel) > 0 {
-		fmt.Printf("\nDocument labels\n%-*s %8s\n", colW, "Label", "label α")
-		fmt.Println(strings.Repeat("-", 43))
-		docLabels := make([]string, 0, len(report.PerDocumentLabel))
-		for k := range report.PerDocumentLabel {
-			docLabels = append(docLabels, k)
-		}
-		sort.Strings(docLabels)
-		for _, label := range docLabels {
-			covStr := "     N/A"
-			if a := report.PerDocumentLabel[label].CoverageAgreement.KrippendorffAlpha; a.Valid {
-				covStr = fmt.Sprintf("%.4f", a.Value)
-			}
-			fmt.Printf("%-*s%s\n", colW, label, covStr)
+	for _, g := range labelGroups(data, report) {
+		for _, label := range g.labels {
+			r := g.results[label]
+			strict, lenient := meanF1(r.SpanAgreement)
+			fmt.Printf("%-*s %-9s %8s %10s %10s\n", labelWidth, label, g.kind,
+				cell(r.CoverageAgreement.KrippendorffAlpha), cell(strict), cell(lenient))
 		}
 	}
 }
