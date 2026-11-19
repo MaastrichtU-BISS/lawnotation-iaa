@@ -95,7 +95,9 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="iaa_report.zip"`)
 	zw := zip.NewWriter(w)
-	if err := writeReportZip(zw, data.Documents, data.Labels, data.Annotators, apiCriterion, apiGranularity, data.AnnotationLevel, nil); err != nil {
+	report := computeIAAFromData("", data, apiCriterion, apiGranularity)
+	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
+	if err := writeReportZip(zw, data, report, confidence, nil); err != nil {
 		log.Printf("error writing report zip: %v", err)
 		return
 	}
