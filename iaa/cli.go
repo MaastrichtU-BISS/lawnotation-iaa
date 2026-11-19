@@ -65,8 +65,6 @@ func RunCLI() {
 	loadDotEnv()
 
 	input := flag.String("input", "", "Path to LawNotation JSON export (required unless --serve)")
-	criterion := flag.String("criterion", "exact", "Match criterion: exact|contained")
-	granularity := flag.String("granularity", "word", "Coverage granularity: char|word")
 	output := flag.String("output", "iaa_report.zip", "Output ZIP path")
 	serve := flag.Bool("serve", false, "Start an HTTP server (POST /metrics, POST /report.zip) instead of running as a one-off CLI batch")
 	port := flag.String("port", "8080", "Port to listen on in --serve mode")
@@ -82,18 +80,8 @@ func RunCLI() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *criterion != "exact" && *criterion != "contained" {
-		fmt.Fprintln(os.Stderr, "error: --criterion must be 'exact' or 'contained'")
-		os.Exit(1)
-	}
-	if *granularity != "char" && *granularity != "word" {
-		fmt.Fprintln(os.Stderr, "error: --granularity must be 'char' or 'word'")
-		os.Exit(1)
-	}
 
 	fmt.Printf("Input        : %s\n", *input)
-	fmt.Printf("Criterion    : %s\n", *criterion)
-	fmt.Printf("Granularity  : %s\n", *granularity)
 	fmt.Printf("Output       : %s\n\n", *output)
 
 	data, err := loadData(*input)
@@ -101,7 +89,7 @@ func RunCLI() {
 		log.Fatalf("error loading data: %v", err)
 	}
 	fmt.Println("Computing agreement...")
-	report := computeIAAFromData(*input, data, *criterion, *granularity)
+	report := computeIAAFromData(*input, data)
 	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
 
 	if dir := filepath.Dir(*output); dir != "." {

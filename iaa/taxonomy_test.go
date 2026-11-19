@@ -122,9 +122,9 @@ func TestSwappingAnnotatorsMirrorsProfileAndKeepsF1(t *testing.T) {
 	}
 }
 
-// Strict scoring is what criterion="exact" produced: a partial match counted
-// as both a spurious span and a missed one.
-func TestStrictMatchesExactCriterion(t *testing.T) {
+// Strict scoring gives a partial match no credit: it counts as a spurious span
+// and a missed one, exactly like a span only one annotator drew.
+func TestStrictGivesPartialMatchesNoCredit(t *testing.T) {
 	documents := []Document{doc("the quick brown fox jumps over the lazy dog",
 		map[string][]Annotation{
 			"1": {ann(4, 9, "A"), ann(10, 15, "A"), ann(20, 25, "A")},
@@ -132,17 +132,15 @@ func TestStrictMatchesExactCriterion(t *testing.T) {
 		})}
 
 	profile, _ := spanErrorProfile(documents, twoLabels, "1", "2")
-	exact := precisionRecallF1(documents, "A", "1", "2", "exact")
 
-	if !profile.strictF1().Valid || !exact.F1.Valid {
-		t.Fatal("expected both scores to be defined")
+	if profile.TruePositives != 1 || profile.BoundaryLarger != 1 ||
+		profile.OnlyFirst != 1 || profile.OnlySecond != 1 {
+		t.Fatalf("unexpected profile: %+v", profile)
 	}
-	if profile.strictF1().Value != exact.F1.Value {
-		t.Errorf("strict F1 %v should equal exact-criterion F1 %v",
-			profile.strictF1().Value, exact.F1.Value)
-	}
-	if profile.TruePositives != exact.TruePositives {
-		t.Errorf("true positives differ: %d vs %d", profile.TruePositives, exact.TruePositives)
+	// tp=1, fp = only_second + boundary = 2, fn = only_first + boundary = 2
+	// -> 2/(2+2+2) = 0.3333
+	if got := profile.strictF1(); !got.Valid || got.Value != 0.3333 {
+		t.Errorf("strict F1 = %+v, want 0.3333", got)
 	}
 }
 

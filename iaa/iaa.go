@@ -82,16 +82,6 @@ func roundFloat(v float64) NullFloat64 {
 // Output schema
 // ---------------------------------------------------------------------------
 
-type PairResult struct {
-	TruePositives     int         `json:"true_positives"`
-	RefSpanCount      int         `json:"ref_span_count"`
-	SysSpanCount      int         `json:"sys_span_count"`
-	Precision         NullFloat64 `json:"precision"`
-	Recall            NullFloat64 `json:"recall"`
-	F1                NullFloat64 `json:"f1"`
-	DocumentsCompared int         `json:"documents_compared"`
-}
-
 type CoverageAgreement struct {
 	MatrixItems       int         `json:"matrix_items"`
 	KrippendorffAlpha NullFloat64 `json:"krippendorff_alpha"`
@@ -118,26 +108,17 @@ type CoverageAgreement struct {
 	PerDocument        []DocumentAlpha `json:"per_document"`
 }
 
-type SpanMatchingSummary struct {
-	MacroF1 NullFloat64                      `json:"macro_f1"`
-	Pairs   map[string]map[string]PairResult `json:"pairs"`
-}
-
 type LabelResult struct {
-	SpanCountsPerAnnotator map[string]int      `json:"span_counts_per_annotator"`
-	SpanMatching           SpanMatchingSummary `json:"span_matching"`
-	SpanAgreement          SpanAgreement       `json:"span_agreement"`
-	CoverageAgreement      CoverageAgreement   `json:"coverage_agreement"`
+	SpanCountsPerAnnotator map[string]int    `json:"span_counts_per_annotator"`
+	SpanAgreement          SpanAgreement     `json:"span_agreement"`
+	CoverageAgreement      CoverageAgreement `json:"coverage_agreement"`
 }
 
 type Meta struct {
-	InputFile       string            `json:"input_file"`
-	AnnotationLevel string            `json:"annotation_level"`
-	Criterion       string            `json:"criterion"`
-	Granularity     string            `json:"granularity"`
-	Annotators      []string          `json:"annotators"`
-	NumDocuments    int               `json:"num_documents"`
-	Notes           map[string]string `json:"notes"`
+	InputFile       string   `json:"input_file"`
+	AnnotationLevel string   `json:"annotation_level"`
+	Annotators      []string `json:"annotators"`
+	NumDocuments    int      `json:"num_documents"`
 }
 
 // TaskData is one loaded export, ready to compute from.
@@ -309,14 +290,8 @@ type span struct{ start, end int }
 
 var wordRe = regexp.MustCompile(`\S+`)
 
-func tokenize(text, granularity string) []span {
-	if granularity == "char" {
-		tokens := make([]span, 0, len(text))
-		for i, r := range text {
-			tokens = append(tokens, span{i, i + len(string(r))})
-		}
-		return tokens
-	}
+// tokenize splits text into the word units coverage agreement counts.
+func tokenize(text string) []span {
 	locs := wordRe.FindAllStringIndex(text, -1)
 	tokens := make([]span, len(locs))
 	for i, loc := range locs {
@@ -345,13 +320,13 @@ func buildAnnMap(doc Document) map[string][]Annotation {
 	return m
 }
 
-func buildCoverageMatrix(documents []Document, label string, annotators []string, granularity string) [][]*float64 {
+func buildCoverageMatrix(documents []Document, label string, annotators []string) [][]*float64 {
 	rows := make([][]*float64, len(annotators))
 	for i := range rows {
 		rows[i] = []*float64{}
 	}
 	for _, doc := range documents {
-		tokens := tokenize(doc.FullText, granularity)
+		tokens := tokenize(doc.FullText)
 		annMap := buildAnnMap(doc)
 		for _, tok := range tokens {
 			for i, annotator := range annotators {
@@ -482,120 +457,6 @@ func confidenceRatingSummary(documents []Document, annotators []string) Confiden
 }
 
 // ---------------------------------------------------------------------------
-// View 1 — Span matching
-// ---------------------------------------------------------------------------
-
-func spansMatch(a, b span, criterion string) bool {
-	if criterion == "exact" {
-		return a.start == b.start && a.end == b.end
-	}
-	return (a.start >= b.start && a.end <= b.end) || (b.start >= a.start && b.end <= a.end)
-}
-
-// matchSpanSets finds the maximum bipartite matching using augmenting-path DFS.
-func matchSpanSets(spansRef, spansSys []span, criterion string) (int, int, int) {
-	adj := make([][]int, len(spansRef))
-	for i, rs := range spansRef {
-		for j, ss := range spansSys {
-			if spansMatch(rs, ss, criterion) {
-				adj[i] = append(adj[i], j)
-			}
-		}
-	}
-	matchSys := make([]int, len(spansSys))
-	for i := range matchSys {
-		matchSys[i] = -1
-	}
-	var augment func(i int, visited map[int]bool) bool
-	augment = func(i int, visited map[int]bool) bool {
-		for _, j := range adj[i] {
-			if visited[j] {
-				continue
-			}
-			visited[j] = true
-			if matchSys[j] == -1 || augment(matchSys[j], visited) {
-				matchSys[j] = i
-				return true
-			}
-		}
-		return false
-	}
-	tp := 0
-	for i := range spansRef {
-		if augment(i, map[int]bool{}) {
-			tp++
-		}
-	}
-	return tp, len(spansRef) - tp, len(spansSys) - tp
-}
-
-func precisionRecallF1(documents []Document, label, annotatorRef, annotatorSys, criterion string) PairResult {
-	totalTP, totalRefUn, totalSysUn, nDocs := 0, 0, 0, 0
-	for _, doc := range documents {
-		annMap := buildAnnMap(doc)
-		refAnns, hasRef := annMap[annotatorRef]
-		sysAnns, hasSys := annMap[annotatorSys]
-		if !hasRef || !hasSys {
-			continue
-		}
-		nDocs++
-		var spansRef, spansSys []span
-		for _, a := range refAnns {
-			if a.Label == label {
-				spansRef = append(spansRef, span{a.Start, a.End})
-			}
-		}
-		for _, a := range sysAnns {
-			if a.Label == label {
-				spansSys = append(spansSys, span{a.Start, a.End})
-			}
-		}
-		tp, refUn, sysUn := matchSpanSets(spansRef, spansSys, criterion)
-		totalTP += tp
-		totalRefUn += refUn
-		totalSysUn += sysUn
-	}
-	nRef := totalTP + totalRefUn
-	nSys := totalTP + totalSysUn
-	var precision, recall, f1 NullFloat64
-	if nSys > 0 {
-		precision = roundFloat(float64(totalTP) / float64(nSys))
-	}
-	if nRef > 0 {
-		recall = roundFloat(float64(totalTP) / float64(nRef))
-	}
-	if precision.Valid && recall.Valid && (precision.Value+recall.Value) > 0 {
-		f1 = roundFloat(2 * precision.Value * recall.Value / (precision.Value + recall.Value))
-	} else if (precision.Valid && precision.Value == 0) || (recall.Valid && recall.Value == 0) {
-		f1 = nullFloat(0.0)
-	}
-	return PairResult{
-		TruePositives:     totalTP,
-		RefSpanCount:      nRef,
-		SysSpanCount:      nSys,
-		Precision:         precision,
-		Recall:            recall,
-		F1:                f1,
-		DocumentsCompared: nDocs,
-	}
-}
-
-func spanMatchingAllPairs(documents []Document, label string, annotators []string, criterion string) map[string]map[string]PairResult {
-	results := map[string]map[string]PairResult{}
-	for i := 0; i < len(annotators); i++ {
-		for j := i + 1; j < len(annotators); j++ {
-			a, b := annotators[i], annotators[j]
-			key := fmt.Sprintf("%s_vs_%s", a, b)
-			results[key] = map[string]PairResult{
-				fmt.Sprintf("%s_as_reference", a): precisionRecallF1(documents, label, a, b, criterion),
-				fmt.Sprintf("%s_as_reference", b): precisionRecallF1(documents, label, b, a, criterion),
-			}
-		}
-	}
-	return results
-}
-
-// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -678,48 +539,19 @@ func safeMean(vals []float64) NullFloat64 {
 	return roundFloat(s / float64(len(vals)))
 }
 
-// computeIAA loads a LawNotation JSON export from disk and computes the
-// full IAA report (CLI path).
-func computeIAA(inputPath, criterion, granularity string) (Report, error) {
-	data, err := loadData(inputPath)
-	if err != nil {
-		return Report{}, err
-	}
-	return computeIAAFromData(inputPath, data, criterion, granularity), nil
-}
-
 // computeIAAFromData computes the full IAA report from already-loaded data,
 // so callers that already have the data in memory (e.g. an HTTP handler
 // reading a request body) don't need to round-trip through a file path.
-func computeIAAFromData(inputLabel string, data TaskData, criterion, granularity string) Report {
+func computeIAAFromData(inputLabel string, data TaskData) Report {
 	labels, annotators := data.Labels, data.Annotators
 	documents, annotationLevel := data.Documents, data.AnnotationLevel
 	isDocumentLevel := annotationLevel == "document"
-	notes := map[string]string{
-		"coverage_agreement": fmt.Sprintf(
-			"Krippendorff's alpha / Cohen's kappa on a "+
-				"%s-level reliability matrix. LENGTH-WEIGHTED.", granularity),
-	}
-	if isDocumentLevel {
-		notes["coverage_agreement"] = "Krippendorff's alpha / Cohen's kappa on whether each " +
-			"annotator applied the label to the document at all (annotation_level=document, " +
-			"so spans have no extent). Span matching is not applicable and omitted."
-	} else {
-		notes["span_matching"] = fmt.Sprintf(
-			"Precision/Recall/F1 from matching whole spans between "+
-				"annotator pairs, using criterion='%s'. Not "+
-				"chance-corrected; reported per-pair in both directions "+
-				"since precision/recall are asymmetric.", criterion)
-	}
 	report := Report{
 		Meta: Meta{
 			InputFile:       inputLabel,
 			AnnotationLevel: annotationLevel,
-			Criterion:       criterion,
-			Granularity:     granularity,
 			Annotators:      annotators,
 			NumDocuments:    len(documents),
-			Notes:           notes,
 		},
 		PerLabel: map[string]LabelResult{},
 	}
@@ -732,19 +564,9 @@ func computeIAAFromData(inputLabel string, data TaskData, criterion, granularity
 		}
 
 		counts := spanCounts(documents, label, annotators)
-		matching := spanMatchingAllPairs(documents, label, annotators, criterion)
-		var labelF1s []float64
-		for _, pairResult := range matching {
-			for _, dir := range pairResult {
-				if dir.F1.Valid {
-					labelF1s = append(labelF1s, dir.F1.Value)
-				}
-			}
-		}
-		macroF1 := safeMean(labelF1s)
 		labelAgreement := spanAgreement(documents, []string{label}, annotators)
 
-		covMatrix := buildCoverageMatrix(documents, label, annotators, granularity)
+		covMatrix := buildCoverageMatrix(documents, label, annotators)
 		covAlpha := krippendorffAlpha(covMatrix)
 		covAlphaPairs := krippendorffAlphaAllPairs(covMatrix, annotators)
 		covKappaPairs := cohenKappaAllPairs(covMatrix, annotators)
@@ -753,10 +575,9 @@ func computeIAAFromData(inputLabel string, data TaskData, criterion, granularity
 			matrixItems = len(covMatrix[0])
 		}
 		markedItems := markedColumnCount(covMatrix)
-		perDocument := perDocumentAlpha(documents, label, annotators, granularity)
+		perDocument := perDocumentAlpha(documents, label, annotators)
 		report.PerLabel[label] = LabelResult{
 			SpanCountsPerAnnotator: counts,
-			SpanMatching:           SpanMatchingSummary{MacroF1: macroF1, Pairs: matching},
 			SpanAgreement:          labelAgreement,
 			CoverageAgreement: CoverageAgreement{
 				MatrixItems:        matrixItems,

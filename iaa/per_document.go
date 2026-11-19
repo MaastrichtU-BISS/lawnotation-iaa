@@ -22,11 +22,11 @@ type DocumentAlpha struct {
 // disagreement are both zero, so alpha comes back 1.0 — perfect agreement
 // about nothing. A label used in forty documents out of nine hundred would
 // otherwise show 860 dots at 1.0 and bury its own result.
-func perDocumentAlpha(documents []Document, label string, annotators []string, granularity string) []DocumentAlpha {
+func perDocumentAlpha(documents []Document, label string, annotators []string) []DocumentAlpha {
 	var out []DocumentAlpha
 	for _, doc := range documents {
 		single := []Document{doc}
-		matrix := buildCoverageMatrix(single, label, annotators, granularity)
+		matrix := buildCoverageMatrix(single, label, annotators)
 		markedItems := markedColumnCount(matrix)
 		if markedItems == 0 {
 			continue

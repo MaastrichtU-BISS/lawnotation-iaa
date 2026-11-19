@@ -1,13 +1,12 @@
 package iaa
 
-// Ortmann's (2022) span error taxonomy, which replaces the exact/contained
-// criterion with one matching pass reported two ways.
+// Ortmann's (2022) span error taxonomy: one matching pass, reported strictly
+// and leniently.
 //
-// Matching here runs across every label at once, unlike precisionRecallF1,
-// which filters to one label before matching. That filter makes a label error
-// unobservable by construction: if both sides hold only spans of label L,
-// no pair can ever disagree about the label. Seeing LE and LBE at all
-// requires the whole annotation set in one pool.
+// Matching can run across every label at once. Filtering to one label first
+// makes a label error unobservable by construction: if both sides hold only
+// spans of label L, no pair can ever disagree about the label. Seeing LE and
+// LBE at all requires the whole annotation set in one pool.
 
 import (
 	"fmt"
@@ -88,7 +87,7 @@ func f1(tp, fp, fn float64) NullFloat64 {
 }
 
 // strictF1 charges every disagreement a full false positive and a full false
-// negative, reproducing what criterion="exact" scored.
+// negative: only an exact match earns credit.
 func (p SpanErrorProfile) strictF1() NullFloat64 {
 	d := float64(p.Disagreements())
 	return f1(float64(p.TruePositives), float64(p.OnlySecond)+d, float64(p.OnlyFirst)+d)

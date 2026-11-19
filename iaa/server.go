@@ -19,16 +19,6 @@ type metricsResponse struct {
 	ConfidenceMetrics ConfidenceRatingSummary `json:"confidence_metrics"`
 }
 
-// The HTTP API takes no scoring parameters. The span error taxonomy reports
-// strict and lenient scoring from one matching pass, which is what the
-// exact/contained criterion used to choose between, and coverage agreement is
-// always word-level — character units multiply the matrix without telling the
-// reader anything the word view does not.
-const (
-	apiCriterion   = "exact"
-	apiGranularity = "word"
-)
-
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -69,7 +59,7 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	report := computeIAAFromData("", data, apiCriterion, apiGranularity)
+	report := computeIAAFromData("", data)
 	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -95,7 +85,7 @@ func handleReportZip(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="iaa_report.zip"`)
 	zw := zip.NewWriter(w)
-	report := computeIAAFromData("", data, apiCriterion, apiGranularity)
+	report := computeIAAFromData("", data)
 	confidence := confidenceRatingSummary(data.Documents, data.Annotators)
 	if err := writeReportZip(zw, data, report, confidence, nil); err != nil {
 		log.Printf("error writing report zip: %v", err)
