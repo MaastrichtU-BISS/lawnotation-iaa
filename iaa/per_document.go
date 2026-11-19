@@ -44,8 +44,3 @@ func perDocumentAlpha(documents []Document, label string, annotators []string) [
 	}
 	return out
 }
-
-// perDocumentPresence is the document-level equivalent: with no span extent
-// there is nothing to measure within a single document, so there is no
-// per-document view to report.
-func perDocumentPresence() []DocumentAlpha { return nil }

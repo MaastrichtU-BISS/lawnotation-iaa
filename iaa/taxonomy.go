@@ -50,18 +50,6 @@ func (p SpanErrorProfile) total() int {
 	return p.TruePositives + p.Disagreements() + p.OnlyFirst + p.OnlySecond
 }
 
-func (p SpanErrorProfile) add(other SpanErrorProfile) SpanErrorProfile {
-	p.TruePositives += other.TruePositives
-	p.LabelErrors += other.LabelErrors
-	p.BoundarySmaller += other.BoundarySmaller
-	p.BoundaryLarger += other.BoundaryLarger
-	p.BoundaryOverlap += other.BoundaryOverlap
-	p.LabelAndBoundary += other.LabelAndBoundary
-	p.OnlyFirst += other.OnlyFirst
-	p.OnlySecond += other.OnlySecond
-	return p
-}
-
 // PairAgreement scores one annotator pair's profile both ways. The two F1s
 // bracket the honest answer: strict allows no partial credit, lenient gives a
 // disagreement half the weight of a span neither annotator's counterpart saw.
