@@ -210,7 +210,7 @@ func metricsCSV(docs []Document, label string, annotators []string, criterion, g
 	return []byte(buf.String())
 }
 
-// confidenceCSV generates confidence.csv content: difficulty_rating stats
+// confidenceCSV generates confidence.csv content: confidence_rating stats
 // and Krippendorff's alpha across annotators for a set of documents. This is
 // independent of label, so it's written once per document (or once for the
 // aggregate) rather than duplicated inside every label's metrics.csv.
@@ -218,7 +218,7 @@ func confidenceCSV(docs []Document, annotators []string) []byte {
 	var buf strings.Builder
 	w := csv.NewWriter(&buf)
 
-	diff := difficultyRatingSummary(docs, annotators)
+	diff := confidenceRatingSummary(docs, annotators)
 	_ = w.Write([]string{"total", fmt.Sprintf("%d", diff.Total)})
 	_ = w.Write([]string{"rated", fmt.Sprintf("%d", diff.Rated)})
 	_ = w.Write([]string{"mean", nullFloatStr(diff.Mean)})
@@ -241,9 +241,9 @@ func confidenceCSV(docs []Document, annotators []string) []byte {
 }
 
 // labelAnnotationsCSV generates annotations.csv content for one document+label.
-// For annotationLevel=="document" data, start/end/text/difficulty_rating are
+// For annotationLevel=="document" data, start/end/text/confidence_rating are
 // omitted: start/end/text are always trivial (0, 0, "") at that level, and
-// difficulty_rating is already reported per document/annotator in
+// confidence_rating is already reported per document/annotator in
 // confidence.csv, so repeating it per annotation row here adds nothing.
 func labelAnnotationsCSV(doc Document, label, annotationLevel string) []byte {
 	var buf strings.Builder
@@ -261,14 +261,14 @@ func labelAnnotationsCSV(doc Document, label, annotationLevel string) []byte {
 		w.Flush()
 		return []byte(buf.String())
 	}
-	_ = w.Write([]string{"annotator", "difficulty_rating", "start", "end", "text"})
+	_ = w.Write([]string{"annotator", "confidence_rating", "start", "end", "text"})
 	for _, asgn := range doc.Assignments {
 		annotatorID := fmt.Sprintf("%v", asgn.Annotator)
 		for _, ann := range asgn.Annotations {
 			if ann.Label == label {
 				_ = w.Write([]string{
 					annotatorID,
-					fmt.Sprintf("%d", asgn.DifficultyRating),
+					fmt.Sprintf("%d", asgn.ConfidenceRating),
 					fmt.Sprintf("%d", ann.Start),
 					fmt.Sprintf("%d", ann.End),
 					ann.Text,
@@ -282,7 +282,7 @@ func labelAnnotationsCSV(doc Document, label, annotationLevel string) []byte {
 
 // aggregatedAnnotationsCSV generates annotations.csv for a label across all documents,
 // with an additional "document" column identifying the source document. See
-// labelAnnotationsCSV for why start/end/text/difficulty_rating are omitted
+// labelAnnotationsCSV for why start/end/text/confidence_rating are omitted
 // for annotationLevel=="document" data.
 func aggregatedAnnotationsCSV(documents []Document, label, annotationLevel string) []byte {
 	var buf strings.Builder
@@ -302,7 +302,7 @@ func aggregatedAnnotationsCSV(documents []Document, label, annotationLevel strin
 		w.Flush()
 		return []byte(buf.String())
 	}
-	_ = w.Write([]string{"document", "annotator", "difficulty_rating", "start", "end", "text"})
+	_ = w.Write([]string{"document", "annotator", "confidence_rating", "start", "end", "text"})
 	for _, doc := range documents {
 		for _, asgn := range doc.Assignments {
 			annotatorID := fmt.Sprintf("%v", asgn.Annotator)
@@ -311,7 +311,7 @@ func aggregatedAnnotationsCSV(documents []Document, label, annotationLevel strin
 					_ = w.Write([]string{
 						stripExt(doc.Name),
 						annotatorID,
-						fmt.Sprintf("%d", asgn.DifficultyRating),
+						fmt.Sprintf("%d", asgn.ConfidenceRating),
 						fmt.Sprintf("%d", ann.Start),
 						fmt.Sprintf("%d", ann.End),
 						ann.Text,
@@ -364,10 +364,10 @@ func reportReadme(labels, annotators []string, criterion, granularity, annotatio
 	b.WriteString("```\n")
 	b.WriteString("aggregated/<label>/metrics.csv        metrics for <label> across all documents\n")
 	b.WriteString("aggregated/<label>/annotations.csv    every annotation for <label> (+ document column)\n")
-	b.WriteString("aggregated/confidence.csv             difficulty-rating agreement across all documents\n")
+	b.WriteString("aggregated/confidence.csv             confidence-rating agreement across all documents\n")
 	b.WriteString("documents/<doc>/<label>/metrics.csv       metrics for <label> restricted to <doc>\n")
 	b.WriteString("documents/<doc>/<label>/annotations.csv   annotations for <label> in <doc>\n")
-	b.WriteString("documents/<doc>/confidence.csv            difficulty-rating agreement for <doc>\n")
+	b.WriteString("documents/<doc>/confidence.csv            confidence-rating agreement for <doc>\n")
 	b.WriteString("```\n")
 
 	b.WriteString("\n## metrics.csv\n\n")
@@ -401,15 +401,15 @@ func reportReadme(labels, annotators []string, criterion, granularity, annotatio
 		b.WriteString("`annotator` (per-document) or `document, annotator` (aggregated) — one row per " +
 			"annotation; start/end/text are omitted since they're trivial at this annotation level.\n")
 	} else {
-		b.WriteString("`annotator, difficulty_rating, start, end, text` (per-document) or " +
-			"`document, annotator, difficulty_rating, start, end, text` (aggregated). " +
+		b.WriteString("`annotator, confidence_rating, start, end, text` (per-document) or " +
+			"`document, annotator, confidence_rating, start, end, text` (aggregated). " +
 			"`start`/`end` are character offsets into the document's full text.\n")
 	}
 
 	b.WriteString("\n## confidence.csv\n\n")
-	b.WriteString("Summary of the `difficulty_rating` (1-5 stars) each annotator gave their assignment: " +
+	b.WriteString("Summary of the `confidence_rating` (1-5 stars) each annotator gave their assignment: " +
 		"`total`, `rated`, `mean`, `star_1`..`star_5` counts, and Krippendorff's alpha (`krippendorff_alpha` " +
-		"plus per-pair values) measuring how consistently annotators rated difficulty.\n")
+		"plus per-pair values) measuring how consistently annotators rated their confidence.\n")
 
 	return []byte(b.String())
 }
@@ -543,10 +543,12 @@ func RunCLI() {
 	fmt.Printf("Output       : %s\n\n", *output)
 
 	// Load raw data (needed for per-document loop)
-	labels, allAnnotators, documents, annotationLevel, err := loadData(*input)
+	data, err := loadData(*input)
 	if err != nil {
 		log.Fatalf("error loading data: %v", err)
 	}
+	labels, allAnnotators := data.Labels, data.Annotators
+	documents, annotationLevel := data.Documents, data.AnnotationLevel
 
 	// Aggregate report
 	fmt.Println("Computing aggregate report...")

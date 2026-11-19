@@ -26,7 +26,7 @@ type Annotation struct {
 
 type Assignment struct {
 	Annotator        interface{}  `json:"annotator"` // int or string in the wild
-	DifficultyRating int          `json:"difficulty_rating"`
+	ConfidenceRating int          `json:"confidence_rating"`
 	Annotations      []Annotation `json:"annotations"`
 }
 
@@ -45,9 +45,15 @@ type Labelset struct {
 }
 
 type InputData struct {
-	Labelset        Labelset   `json:"labelset"`
-	Documents       []Document `json:"documents"`
-	AnnotationLevel string     `json:"annotation_level"`
+	Labelset Labelset `json:"labelset"`
+	// DocumentLabelset is present on a hybrid task: labels applied to a whole
+	// document alongside the span labels in Labelset.
+	DocumentLabelset Labelset   `json:"document_labelset"`
+	Documents        []Document `json:"documents"`
+	AnnotationLevel  string     `json:"annotation_level"`
+	// SpanGranularity is the same value under the name Lawnotation's download
+	// export now writes. See annotationLevelOf.
+	SpanGranularity string `json:"span_granularity"`
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +93,29 @@ type PairResult struct {
 }
 
 type CoverageAgreement struct {
-	MatrixItems       int                    `json:"matrix_items"`
-	KrippendorffAlpha NullFloat64            `json:"krippendorff_alpha"`
-	CohenKappaPairs   map[string]NullFloat64 `json:"cohen_kappa_pairs"`
+	MatrixItems       int         `json:"matrix_items"`
+	KrippendorffAlpha NullFloat64 `json:"krippendorff_alpha"`
+	// MarkedItems counts the units at least one annotator marked. Over a
+	// corpus most units are blank, and agreed-upon blankness dominates the
+	// matrix, so alpha on its own can report mostly how much text nobody
+	// touched. Reporting the share alongside it says how much of the score
+	// that is, without inventing a second coefficient to compare against.
+	MarkedItems int `json:"marked_items"`
+	// AlphaPairs is the same coefficient restricted to each pair of
+	// annotators. Krippendorff rather than Cohen so a pair's figure and the
+	// all-annotator figure above it are the same quantity under the same
+	// chance model, and so a pair where one annotator saw no documents in
+	// common with the other still resolves instead of failing.
+	AlphaPairs map[string]NullFloat64 `json:"krippendorff_alpha_pairs"`
+	// CohenKappaPairs is the other conventional pairwise coefficient. On this
+	// data it tracks AlphaPairs to within 0.003 (see coefficients_test.go);
+	// it is reported because a task with exactly two annotators has no use
+	// for a multi-annotator coefficient and kappa is what readers expect.
+	CohenKappaPairs map[string]NullFloat64 `json:"cohen_kappa_pairs"`
+	// PerDocument covers only the documents in which the label was used, so a
+	// corpus figure can be read against the spread behind it.
+	DocumentsWithLabel int             `json:"documents_with_label"`
+	PerDocument        []DocumentAlpha `json:"per_document"`
 }
 
 type SpanMatchingSummary struct {
@@ -100,6 +126,7 @@ type SpanMatchingSummary struct {
 type LabelResult struct {
 	SpanCountsPerAnnotator map[string]int      `json:"span_counts_per_annotator"`
 	SpanMatching           SpanMatchingSummary `json:"span_matching"`
+	SpanAgreement          SpanAgreement       `json:"span_agreement"`
 	CoverageAgreement      CoverageAgreement   `json:"coverage_agreement"`
 }
 
@@ -113,9 +140,22 @@ type Meta struct {
 	Notes           map[string]string `json:"notes"`
 }
 
+// TaskData is one loaded export, ready to compute from.
+type TaskData struct {
+	Labels []string
+	// DocumentLabels is empty unless the task is hybrid.
+	DocumentLabels  []string
+	Annotators      []string
+	Documents       []Document
+	AnnotationLevel string
+}
+
 type Report struct {
 	Meta     Meta                   `json:"meta"`
 	PerLabel map[string]LabelResult `json:"per_label"`
+	// PerDocumentLabel is present on a hybrid task, scoring the whole-document
+	// labels the way a document-level task scores its only labelset.
+	PerDocumentLabel map[string]LabelResult `json:"per_document_label,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -367,13 +407,13 @@ func buildPresenceMatrix(documents []Document, label string, annotators []string
 }
 
 // ---------------------------------------------------------------------------
-// Difficulty rating agreement
+// Confidence rating agreement
 // ---------------------------------------------------------------------------
 
-// buildDifficultyMatrix returns an annotators x documents reliability matrix
-// of difficulty_rating values. A value of 0 (unrated) or a missing assignment
+// buildConfidenceMatrix returns an annotators x documents reliability matrix
+// of confidence_rating values. A value of 0 (unrated) or a missing assignment
 // is represented as nil (missing), matching buildCoverageMatrix's convention.
-func buildDifficultyMatrix(documents []Document, annotators []string) [][]*float64 {
+func buildConfidenceMatrix(documents []Document, annotators []string) [][]*float64 {
 	rows := make([][]*float64, len(annotators))
 	for i := range rows {
 		rows[i] = make([]*float64, len(documents))
@@ -381,7 +421,7 @@ func buildDifficultyMatrix(documents []Document, annotators []string) [][]*float
 	for docIdx, doc := range documents {
 		ratings := map[string]int{}
 		for _, asgn := range doc.Assignments {
-			ratings[fmt.Sprintf("%v", asgn.Annotator)] = asgn.DifficultyRating
+			ratings[fmt.Sprintf("%v", asgn.Annotator)] = asgn.ConfidenceRating
 		}
 		for i, annotator := range annotators {
 			if r, ok := ratings[annotator]; ok && r >= 1 && r <= 5 {
@@ -392,41 +432,52 @@ func buildDifficultyMatrix(documents []Document, annotators []string) [][]*float
 	return rows
 }
 
-type DifficultyRatingSummary struct {
+type ConfidenceRatingSummary struct {
 	Total      int                    `json:"total"`
 	Rated      int                    `json:"rated"`
 	Mean       NullFloat64            `json:"mean"`
 	Counts     map[int]int            `json:"counts"` // keys 1..5
 	Alpha      NullFloat64            `json:"krippendorff_alpha"`
 	AlphaPairs map[string]NullFloat64 `json:"krippendorff_alpha_pairs"`
+	// RatedPerAnnotator says how many of each annotator's own assignments
+	// carry a rating. An annotator who rated none makes every pair involving
+	// them undefined, which is worth saying outright rather than leaving the
+	// reader to infer it from a row of blanks.
+	RatedPerAnnotator map[string]int `json:"rated_per_annotator"`
 }
 
-// difficultyRatingSummary computes total/rated counts, the star histogram,
+// confidenceRatingSummary computes total/rated counts, the star histogram,
 // mean rating (over rated assignments only), and Krippendorff's alpha (both
-// overall and per annotator pair) for the difficulty_rating field over the
+// overall and per annotator pair) for the confidence_rating field over the
 // given documents.
-func difficultyRatingSummary(documents []Document, annotators []string) DifficultyRatingSummary {
+func confidenceRatingSummary(documents []Document, annotators []string) ConfidenceRatingSummary {
 	total := 0
 	counts := map[int]int{1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+	ratedPer := map[string]int{}
+	for _, a := range annotators {
+		ratedPer[a] = 0
+	}
 	var ratedVals []float64
 	for _, doc := range documents {
 		for _, asgn := range doc.Assignments {
 			total++
-			r := asgn.DifficultyRating
+			r := asgn.ConfidenceRating
 			if r >= 1 && r <= 5 {
 				counts[r]++
 				ratedVals = append(ratedVals, float64(r))
+				ratedPer[fmt.Sprintf("%v", asgn.Annotator)]++
 			}
 		}
 	}
-	matrix := buildDifficultyMatrix(documents, annotators)
-	return DifficultyRatingSummary{
-		Total:      total,
-		Rated:      len(ratedVals),
-		Mean:       safeMean(ratedVals),
-		Counts:     counts,
-		Alpha:      krippendorffAlpha(matrix),
-		AlphaPairs: krippendorffAlphaAllPairs(matrix, annotators),
+	matrix := buildConfidenceMatrix(documents, annotators)
+	return ConfidenceRatingSummary{
+		Total:             total,
+		Rated:             len(ratedVals),
+		Mean:              safeMean(ratedVals),
+		Counts:            counts,
+		Alpha:             krippendorffAlpha(matrix),
+		AlphaPairs:        krippendorffAlphaAllPairs(matrix, annotators),
+		RatedPerAnnotator: ratedPer,
 	}
 }
 
@@ -569,10 +620,10 @@ func spanCounts(documents []Document, label string, annotators []string) map[str
 }
 
 // loadData reads a LawNotation JSON export from disk (CLI path).
-func loadData(path string) ([]string, []string, []Document, string, error) {
+func loadData(path string) (TaskData, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return TaskData{}, err
 	}
 	defer f.Close()
 	return loadDataFromReader(f)
@@ -580,14 +631,17 @@ func loadData(path string) ([]string, []string, []Document, string, error) {
 
 // loadDataFromReader reads a LawNotation JSON export from any reader (e.g. an
 // HTTP request body), sharing the same extraction logic as loadData.
-func loadDataFromReader(r io.Reader) ([]string, []string, []Document, string, error) {
+func loadDataFromReader(r io.Reader) (TaskData, error) {
 	var raw InputData
 	if err := json.NewDecoder(r).Decode(&raw); err != nil {
-		return nil, nil, nil, "", err
+		return TaskData{}, err
 	}
-	labels := make([]string, len(raw.Labelset.Labels))
-	for i, l := range raw.Labelset.Labels {
-		labels[i] = l.Name
+	names := func(ls Labelset) []string {
+		out := make([]string, len(ls.Labels))
+		for i, l := range ls.Labels {
+			out[i] = l.Name
+		}
+		return out
 	}
 	annotatorSet := map[string]bool{}
 	for _, doc := range raw.Documents {
@@ -600,11 +654,13 @@ func loadDataFromReader(r io.Reader) ([]string, []string, []Document, string, er
 		annotators = append(annotators, a)
 	}
 	sort.Strings(annotators)
-	annotationLevel := raw.AnnotationLevel
-	if annotationLevel == "" {
-		annotationLevel = "span"
-	}
-	return labels, annotators, raw.Documents, annotationLevel, nil
+	return TaskData{
+		Labels:          names(raw.Labelset),
+		DocumentLabels:  names(raw.DocumentLabelset),
+		Annotators:      annotators,
+		Documents:       raw.Documents,
+		AnnotationLevel: annotationLevelOf(raw),
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -625,17 +681,19 @@ func safeMean(vals []float64) NullFloat64 {
 // computeIAA loads a LawNotation JSON export from disk and computes the
 // full IAA report (CLI path).
 func computeIAA(inputPath, criterion, granularity string) (Report, error) {
-	labels, annotators, documents, annotationLevel, err := loadData(inputPath)
+	data, err := loadData(inputPath)
 	if err != nil {
 		return Report{}, err
 	}
-	return computeIAAFromData(inputPath, labels, annotators, documents, annotationLevel, criterion, granularity), nil
+	return computeIAAFromData(inputPath, data, criterion, granularity), nil
 }
 
 // computeIAAFromData computes the full IAA report from already-loaded data,
 // so callers that already have the data in memory (e.g. an HTTP handler
 // reading a request body) don't need to round-trip through a file path.
-func computeIAAFromData(inputLabel string, labels, annotators []string, documents []Document, annotationLevel, criterion, granularity string) Report {
+func computeIAAFromData(inputLabel string, data TaskData, criterion, granularity string) Report {
+	labels, annotators := data.Labels, data.Annotators
+	documents, annotationLevel := data.Documents, data.AnnotationLevel
 	isDocumentLevel := annotationLevel == "document"
 	notes := map[string]string{
 		"coverage_agreement": fmt.Sprintf(
@@ -666,46 +724,56 @@ func computeIAAFromData(inputLabel string, labels, annotators []string, document
 		PerLabel: map[string]LabelResult{},
 	}
 	for _, label := range labels {
-		counts := spanCounts(documents, label, annotators)
-
-		var macroF1 NullFloat64
-		var matching map[string]map[string]PairResult
+		// A document-level task's own labelset is scored exactly the way a
+		// hybrid task's second labelset is — one unit per document.
 		if isDocumentLevel {
-			macroF1 = noFloat()
-		} else {
-			matching = spanMatchingAllPairs(documents, label, annotators, criterion)
-			var labelF1s []float64
-			for _, pairResult := range matching {
-				for _, dir := range pairResult {
-					if dir.F1.Valid {
-						labelF1s = append(labelF1s, dir.F1.Value)
-					}
+			report.PerLabel[label] = documentLabelResult(documents, label, annotators)
+			continue
+		}
+
+		counts := spanCounts(documents, label, annotators)
+		matching := spanMatchingAllPairs(documents, label, annotators, criterion)
+		var labelF1s []float64
+		for _, pairResult := range matching {
+			for _, dir := range pairResult {
+				if dir.F1.Valid {
+					labelF1s = append(labelF1s, dir.F1.Value)
 				}
 			}
-			macroF1 = safeMean(labelF1s)
 		}
+		macroF1 := safeMean(labelF1s)
+		labelAgreement := spanAgreement(documents, []string{label}, annotators)
 
-		var covMatrix [][]*float64
-		if isDocumentLevel {
-			covMatrix = buildPresenceMatrix(documents, label, annotators)
-		} else {
-			covMatrix = buildCoverageMatrix(documents, label, annotators, granularity)
-		}
+		covMatrix := buildCoverageMatrix(documents, label, annotators, granularity)
 		covAlpha := krippendorffAlpha(covMatrix)
-		covKappas := cohenKappaAllPairs(covMatrix, annotators)
+		covAlphaPairs := krippendorffAlphaAllPairs(covMatrix, annotators)
+		covKappaPairs := cohenKappaAllPairs(covMatrix, annotators)
 		matrixItems := 0
 		if len(covMatrix) > 0 {
 			matrixItems = len(covMatrix[0])
 		}
+		markedItems := markedColumnCount(covMatrix)
+		perDocument := perDocumentAlpha(documents, label, annotators, granularity)
 		report.PerLabel[label] = LabelResult{
 			SpanCountsPerAnnotator: counts,
 			SpanMatching:           SpanMatchingSummary{MacroF1: macroF1, Pairs: matching},
+			SpanAgreement:          labelAgreement,
 			CoverageAgreement: CoverageAgreement{
-				MatrixItems:       matrixItems,
-				KrippendorffAlpha: covAlpha,
-				CohenKappaPairs:   covKappas,
+				MatrixItems:        matrixItems,
+				KrippendorffAlpha:  covAlpha,
+				MarkedItems:        markedItems,
+				AlphaPairs:         covAlphaPairs,
+				CohenKappaPairs:    covKappaPairs,
+				DocumentsWithLabel: len(perDocument),
+				PerDocument:        perDocument,
 			},
 		}
+	}
+	for _, label := range data.DocumentLabels {
+		if report.PerDocumentLabel == nil {
+			report.PerDocumentLabel = map[string]LabelResult{}
+		}
+		report.PerDocumentLabel[label] = documentLabelResult(documents, label, annotators)
 	}
 	return report
 }
