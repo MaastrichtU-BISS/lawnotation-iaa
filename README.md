@@ -148,7 +148,7 @@ Endpoints (request body is the LawNotation JSON export, same schema as `--input`
 
 | Endpoint | Query params | Response |
 |----------|--------------|----------|
-| `POST /metrics` | `criterion`, `granularity` (same values/defaults as above) | JSON: `{ "annotation_metrics": <report>, "confidence_metrics": <difficulty rating summary> }` |
+| `POST /metrics` | `criterion`, `granularity` (same values/defaults as above) | JSON: `{ "annotation_metrics": <report>, "confidence_metrics": <confidence rating summary> }` |
 | `POST /report.zip` | `criterion`, `granularity` | The same ZIP report the CLI produces |
 
 ```bash
